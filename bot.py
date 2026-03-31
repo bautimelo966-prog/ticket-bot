@@ -23,13 +23,19 @@ URLS_FILE        = "urls.json"
 KEYWORDS_AVAILABLE = [
     "comprar", "compra", "comprá", "buy", "agregar al carrito",
     "seleccionar", "disponible", "en venta", "obtener entradas",
-    "tickets disponibles", "comprar entrada",
+    "tickets disponibles", "comprar entrada", "comprar entradas",
+    "ver entradas", "ver tickets", "adquirir", "adquirí",
+    "conseguir entradas", "quiero ir", "comprar ticket",
+    "elegir entradas", "elegí tu entrada", "comprá tu entrada",
+    "comprá acá", "compra acá", "compra aquí",
 ]
 
 # Palabras que indican que NO hay entradas
 KEYWORDS_SOLD_OUT = [
     "agotado", "agotadas", "sold out", "no disponible",
     "no hay entradas", "sin stock", "próximamente", "proximamente",
+    "pronto disponible", "entradas proximamente", "fecha a confirmar",
+    "anuncio próximamente", "stay tuned",
 ]
 
 # Headers para simular un navegador real
