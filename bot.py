@@ -5,6 +5,7 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
+from playwright.sync_api import sync_playwright
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -16,10 +17,9 @@ log = logging.getLogger(__name__)
 # ── Config ─────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-CHECK_INTERVAL   = int(os.getenv("CHECK_INTERVAL", "180"))  # segundos
+CHECK_INTERVAL   = int(os.getenv("CHECK_INTERVAL", "1200"))  # 20 minutos
 URLS_FILE        = "urls.json"
 
-# Palabras que indican que HAY entradas disponibles
 KEYWORDS_AVAILABLE = [
     "comprar", "compra", "comprá", "buy", "agregar al carrito",
     "seleccionar", "disponible", "en venta", "obtener entradas",
@@ -30,7 +30,6 @@ KEYWORDS_AVAILABLE = [
     "comprá acá", "compra acá", "compra aquí",
 ]
 
-# Palabras que indican que NO hay entradas
 KEYWORDS_SOLD_OUT = [
     "agotado", "agotadas", "sold out", "no disponible",
     "no hay entradas", "sin stock", "próximamente", "proximamente",
@@ -38,7 +37,6 @@ KEYWORDS_SOLD_OUT = [
     "anuncio próximamente", "stay tuned",
 ]
 
-# Headers para simular un navegador real
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -51,7 +49,6 @@ HEADERS = {
 
 # ── Manejo de URLs ─────────────────────────────────────────────────────────
 def load_urls() -> dict:
-    """Carga las URLs guardadas. Devuelve dict {url: {"name": ..., "last_status": ...}}"""
     if os.path.exists(URLS_FILE):
         with open(URLS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -86,30 +83,66 @@ def get_telegram_updates(offset: int) -> list:
         log.error(f"Error obteniendo updates: {e}")
         return []
 
+# ── Movistar Arena (Playwright) ────────────────────────────────────────────
+def check_movistar_arena(url: str) -> dict:
+    email    = os.environ.get("MOVISTAR_EMAIL", "")
+    password = os.environ.get("MOVISTAR_PASSWORD", "")
+
+    if not email or not password:
+        return {"status": "error", "snippet": "Credenciales de Movistar Arena no configuradas"}
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            # Login
+            page.goto("https://login.movistararena.com.ar/Account/Login", timeout=30000)
+            page.fill("#inputEmail", email)
+            page.fill("#inputPassword", password)
+            page.click("button.btn-login")
+            page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
+
+            # Ir al evento
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+
+            text = page.inner_text("body").lower()
+            browser.close()
+
+        for kw in KEYWORDS_SOLD_OUT:
+            if kw in text:
+                return {"status": "sold_out", "snippet": kw}
+
+        for kw in KEYWORDS_AVAILABLE:
+            if kw in text:
+                return {"status": "available", "snippet": kw}
+
+        return {"status": "unknown", "snippet": ""}
+
+    except Exception as e:
+        log.error(f"Error Playwright: {e}")
+        return {"status": "error", "snippet": str(e)}
+
 # ── Chequeo de página ──────────────────────────────────────────────────────
 def check_url(url: str) -> dict:
-    """
-    Retorna:
-      status: "available" | "sold_out" | "unknown" | "error"
-      snippet: texto relevante encontrado
-    """
+    if "movistararena.com.ar" in url:
+        return check_movistar_arena(url)
+
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # Eliminar scripts y estilos para quedarnos con texto visible
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
 
         text = soup.get_text(separator=" ").lower()
 
-        # Buscar sold out primero (tiene prioridad)
         for kw in KEYWORDS_SOLD_OUT:
             if kw in text:
                 return {"status": "sold_out", "snippet": kw}
 
-        # Buscar disponibles
         for kw in KEYWORDS_AVAILABLE:
             if kw in text:
                 return {"status": "available", "snippet": kw}
@@ -123,25 +156,22 @@ def check_url(url: str) -> dict:
 
 # ── Procesamiento de comandos Telegram ────────────────────────────────────
 def handle_command(text: str, urls: dict) -> str:
-    """Procesa comandos y retorna mensaje de respuesta."""
     parts = text.strip().split(maxsplit=2)
     cmd = parts[0].lower()
 
-    # /add URL nombre_del_evento
     if cmd == "/add":
         if len(parts) < 3:
-            return "⚠️ Uso correcto:\n<code>/add URL Nombre del evento</code>\n\nEjemplo:\n<code>/add https://ticketek.com.ar/evento/xxx Coldplay Fecha 1</code>"
+            return "⚠️ Uso correcto:\n<code>/add URL Nombre del evento</code>"
         url  = parts[1]
         name = parts[2]
         if not url.startswith("http"):
             return "⚠️ La URL debe empezar con http:// o https://"
         if len(urls) >= 20:
-            return "⚠️ Límite de 20 URLs alcanzado. Eliminá alguna con /remove antes de agregar."
+            return "⚠️ Límite de 20 URLs alcanzado."
         urls[url] = {"name": name, "last_status": "unknown", "added": datetime.now().isoformat()}
         save_urls(urls)
         return f"✅ Agregado:\n<b>{name}</b>\n{url}\n\nEmpezaré a monitorearlo de inmediato."
 
-    # /remove URL
     elif cmd == "/remove":
         if len(parts) < 2:
             return "⚠️ Uso correcto:\n<code>/remove URL</code>"
@@ -153,7 +183,6 @@ def handle_command(text: str, urls: dict) -> str:
             return f"🗑️ Eliminado: <b>{name}</b>"
         return "⚠️ No encontré esa URL en la lista."
 
-    # /list
     elif cmd == "/list":
         if not urls:
             return "📋 No tenés URLs en monitoreo.\nAgregá una con /add"
@@ -163,13 +192,11 @@ def handle_command(text: str, urls: dict) -> str:
             lines.append(f"{i}. {status_emoji} <b>{data['name']}</b>\n   <a href='{url}'>{url[:60]}...</a>")
         return "\n".join(lines)
 
-    # /check  (fuerza chequeo inmediato)
     elif cmd == "/check":
         if not urls:
             return "📋 No tenés URLs en monitoreo."
         return "__force_check__"
 
-    # /help
     elif cmd in ("/help", "/start"):
         return (
             "🎫 <b>Bot de Entradas</b>\n\n"
@@ -179,14 +206,13 @@ def handle_command(text: str, urls: dict) -> str:
             "/list — Ver todas las URLs activas\n"
             "/check — Forzar chequeo ahora mismo\n"
             "/help — Ver esta ayuda\n\n"
-            "El bot chequea automáticamente cada 3 minutos."
+            "El bot chequea automáticamente cada 20 minutos."
         )
 
     return f"❓ Comando no reconocido: {cmd}\nEscribí /help para ver los comandos."
 
 # ── Loop principal ─────────────────────────────────────────────────────────
 def run_check(urls: dict, notify_no_change=False):
-    """Chequea todas las URLs y notifica cambios."""
     if not urls:
         return
 
@@ -195,16 +221,14 @@ def run_check(urls: dict, notify_no_change=False):
 
     for url, data in urls.items():
         result = check_url(url)
-        new_status   = result["status"]
-        prev_status  = data.get("last_status", "unknown")
-        name         = data["name"]
+        new_status  = result["status"]
+        prev_status = data.get("last_status", "unknown")
+        name        = data["name"]
 
         log.info(f"  [{new_status}] {name}")
 
-        # Solo notificar si cambió el estado o si es la primera vez que está disponible
         if new_status == "available" and prev_status != "available":
             changed.append((url, name, new_status, result["snippet"]))
-
         elif new_status == "error":
             log.warning(f"  Error en {url}: {result['snippet']}")
 
@@ -212,7 +236,6 @@ def run_check(urls: dict, notify_no_change=False):
 
     save_urls(urls)
 
-    # Enviar alertas
     for url, name, status, snippet in changed:
         msg = (
             f"🚨 <b>¡ENTRADAS DISPONIBLES!</b>\n\n"
@@ -240,7 +263,6 @@ def main():
     offset = 0
 
     while True:
-        # ── Procesar mensajes de Telegram ──────────────────────────────
         updates = get_telegram_updates(offset)
         for update in updates:
             offset = update["update_id"] + 1
@@ -254,7 +276,6 @@ def main():
                 else:
                     send_telegram(response)
 
-        # ── Chequeo automático ─────────────────────────────────────────
         now = time.time()
         if now - last_check >= CHECK_INTERVAL:
             run_check(urls)
