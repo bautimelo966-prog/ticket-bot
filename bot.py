@@ -144,6 +144,30 @@ def check_movistar_arena(url: str) -> dict:
 
 # ── Chequeo de página ──────────────────────────────────────────────────────
 def check_url(url: str) -> dict:
+    from playwright.sync_api import sync_playwright
+
+def check_allaccess(url: str) -> dict:
+    if "allaccess.com.ar" in url:
+    return check_allaccess(url)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.goto(url, timeout=30000)
+            page.wait_for_timeout(5000)
+
+            content = page.content().lower()
+
+            if "ver entradas" in content:
+                browser.close()
+                return {"status": "available", "snippet": "ver entradas"}
+
+            browser.close()
+            return {"status": "sold_out", "snippet": "no disponible"}
+
+    except Exception as e:
+        return {"status": "error", "snippet": str(e)}
     if "movistararena.com.ar" in url:
         return check_movistar_arena(url)
 
