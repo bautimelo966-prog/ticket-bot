@@ -107,18 +107,36 @@ def check_movistar_arena(url: str) -> dict:
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
 
-            text = page.inner_text("body").lower()
+            # Buscar todos los botones de fechas disponibles (verdes)
+            fecha_buttons = page.query_selector_all("button.dia-evento:not(.mud-theme-secondary)")
+            
+            disponibles = []
+
+            for btn in fecha_buttons:
+                try:
+                    btn.click()
+                    page.wait_for_timeout(1500)  # esperar que actualice
+
+                    # Buscar botones de tickets que NO estén deshabilitados
+                    ticket_buttons = page.query_selector_all("button:not(.btn-disabled) span.mud-button-label")
+                    
+                    for tb in ticket_buttons:
+                        texto = tb.inner_text().strip().lower()
+                        if "seleccionar" in texto:
+                            # Obtener qué fecha es
+                            day_style = btn.get_attribute("style") or ""
+                            disponibles.append(day_style)
+                            break
+
+                except Exception:
+                    continue
+
             browser.close()
 
-        for kw in KEYWORDS_SOLD_OUT:
-            if kw in text:
-                return {"status": "sold_out", "snippet": kw}
-
-        for kw in KEYWORDS_AVAILABLE:
-            if kw in text:
-                return {"status": "available", "snippet": kw}
-
-        return {"status": "unknown", "snippet": ""}
+        if disponibles:
+            return {"status": "available", "snippet": f"Fechas con entradas: {', '.join(disponibles)}"}
+        
+        return {"status": "sold_out", "snippet": "agotado"}
 
     except Exception as e:
         log.error(f"Error Playwright: {e}")
