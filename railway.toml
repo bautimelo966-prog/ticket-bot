@@ -1,6 +1,5 @@
 [build]
-builder = "NIXPACKS"
-buildCommand = "pip install playwright==1.44.0 && playwright install chromium && apt-get install -y libasound2t64 || true"
+builder = "DOCKERFILE"
 
 [deploy]
 startCommand = "python bot.py"
