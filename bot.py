@@ -117,8 +117,7 @@ def check_movistar_arena(url: str) -> dict:
                     btn.click()
                     page.wait_for_timeout(1500)
 
-                    ticket_buttons = page.query_selector_all("button:not(.btn-disabled) span.mud-button-label")
-
+                   ticket_buttons = page.query_selector_all("span.mud-button-label")
                     for tb in ticket_buttons:
                         texto = tb.inner_text().strip().lower()
                         if "seleccionar" in texto:
