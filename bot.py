@@ -17,9 +17,9 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 URLS_FILE        = "urls.json"
 
-CHECK_INTERVAL_MOVISTAR  = 1200  # 20 minutos
-CHECK_INTERVAL_ALLACCESS = 300   # 5 minutos
-CHECK_INTERVAL_DEFAULT   = 1200  # 20 minutos para otros
+CHECK_INTERVAL_MOVISTAR  = 1200
+CHECK_INTERVAL_ALLACCESS = 300
+CHECK_INTERVAL_DEFAULT   = 1200
 
 KEYWORDS_AVAILABLE = [
     "comprar", "compra", "comprá", "buy", "agregar al carrito",
@@ -103,19 +103,19 @@ def check_allaccess(url: str) -> dict:
             browser.close()
 
         if buy_button and not soldout:
-            return {"status": "available", "snippet": "Ver entradas"}
-        return {"status": "sold_out", "snippet": "agotado"}
+            return {"status": "available", "snippet": "Ver entradas", "fechas": {}}
+        return {"status": "sold_out", "snippet": "agotado", "fechas": {}}
 
     except Exception as e:
         log.error(f"Error AllAccess: {e}")
-        return {"status": "error", "snippet": str(e)}
+        return {"status": "error", "snippet": str(e), "fechas": {}}
 
 def check_movistar_arena(url: str) -> dict:
     email    = os.environ.get("MOVISTAR_EMAIL", "")
     password = os.environ.get("MOVISTAR_PASSWORD", "")
 
     if not email or not password:
-        return {"status": "error", "snippet": "Credenciales de Movistar Arena no configuradas"}
+        return {"status": "error", "snippet": "Credenciales no configuradas", "fechas": {}}
 
     try:
         with sync_playwright() as p:
@@ -131,7 +131,8 @@ def check_movistar_arena(url: str) -> dict:
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
 
-            disponibles = []
+            # fechas_estado = {"19 de mayo": "available", "23 de mayo": "sold_out", ...}
+            fechas_estado = {}
 
             try:
                 page.wait_for_selector("button.dia-evento", timeout=8000)
@@ -145,14 +146,21 @@ def check_movistar_arena(url: str) -> dict:
                     try:
                         btn.click()
                         page.wait_for_timeout(1500)
+                        dia_el = btn.query_selector("p")
+                        dia = dia_el.inner_text().strip() if dia_el else "?"
+                        fecha_label = f"{dia} de {mes_texto}"
+
                         ticket_buttons = page.query_selector_all("span.mud-button-label")
+                        tiene_disponible = False
                         for tb in ticket_buttons:
                             texto = tb.inner_text().strip().lower()
                             if "seleccionar" in texto or "comprar" in texto:
-                                dia_el = btn.query_selector("p")
-                                dia = dia_el.inner_text().strip() if dia_el else "?"
-                                disponibles.append(f"{dia} de {mes_texto}")
+                                tiene_disponible = True
                                 break
+
+                        fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
+                        log.info(f"  {fecha_label}: {'available' if tiene_disponible else 'sold_out'}")
+
                     except Exception as ex:
                         log.warning(f"Error en fecha: {ex}")
                         continue
@@ -160,33 +168,44 @@ def check_movistar_arena(url: str) -> dict:
             except Exception:
                 log.info("Sin calendario, usando formato lista")
                 filas = page.query_selector_all("div.evento-row")
-                log.info(f"Filas encontradas: {len(filas)}")
 
                 for fila in filas:
                     try:
+                        dia_el = fila.query_selector("div.fecha p")
+                        mes_el = fila.query_selector("div.fecha span")
+                        dia = dia_el.inner_text().strip() if dia_el else "?"
+                        mes = mes_el.inner_text().strip() if mes_el else "?"
+                        fecha_label = f"{dia} de {mes}"
+
                         ticket_buttons = fila.query_selector_all("span.mud-button-label")
+                        tiene_disponible = False
                         for tb in ticket_buttons:
                             texto = tb.inner_text().strip().lower()
                             if "seleccionar" in texto or "comprar" in texto:
-                                dia_el = fila.query_selector("div.fecha p")
-                                mes_el = fila.query_selector("div.fecha span")
-                                dia = dia_el.inner_text().strip() if dia_el else "?"
-                                mes = mes_el.inner_text().strip() if mes_el else "?"
-                                disponibles.append(f"{dia} de {mes}")
+                                tiene_disponible = True
                                 break
+
+                        fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
+                        log.info(f"  {fecha_label}: {'available' if tiene_disponible else 'sold_out'}")
+
                     except Exception as ex:
                         log.warning(f"Error en fila: {ex}")
                         continue
 
             browser.close()
 
+        disponibles = [f for f, s in fechas_estado.items() if s == "available"]
         if disponibles:
-            return {"status": "available", "snippet": f"Fechas disponibles: {', '.join(disponibles)}"}
-        return {"status": "sold_out", "snippet": "agotado"}
+            return {
+                "status": "available",
+                "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
+                "fechas": fechas_estado
+            }
+        return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
 
     except Exception as e:
         log.error(f"Error Playwright: {e}")
-        return {"status": "error", "snippet": str(e)}
+        return {"status": "error", "snippet": str(e), "fechas": {}}
 
 def check_url(url: str) -> dict:
     if "movistararena.com.ar" in url:
@@ -206,18 +225,18 @@ def check_url(url: str) -> dict:
 
         for kw in KEYWORDS_SOLD_OUT:
             if kw in text:
-                return {"status": "sold_out", "snippet": kw}
+                return {"status": "sold_out", "snippet": kw, "fechas": {}}
 
         for kw in KEYWORDS_AVAILABLE:
             if kw in text:
-                return {"status": "available", "snippet": kw}
+                return {"status": "available", "snippet": kw, "fechas": {}}
 
-        return {"status": "unknown", "snippet": ""}
+        return {"status": "unknown", "snippet": "", "fechas": {}}
 
     except requests.exceptions.HTTPError as e:
-        return {"status": "error", "snippet": str(e)}
+        return {"status": "error", "snippet": str(e), "fechas": {}}
     except Exception as e:
-        return {"status": "error", "snippet": str(e)}
+        return {"status": "error", "snippet": str(e), "fechas": {}}
 
 def handle_command(text: str, urls: dict) -> str:
     parts = text.strip().split(maxsplit=2)
@@ -232,7 +251,7 @@ def handle_command(text: str, urls: dict) -> str:
             return "⚠️ La URL debe empezar con http:// o https://"
         if len(urls) >= 20:
             return "⚠️ Límite de 20 URLs alcanzado."
-        urls[url] = {"name": name, "last_status": "unknown", "last_check": 0, "added": datetime.now().isoformat()}
+        urls[url] = {"name": name, "last_status": "unknown", "last_check": 0, "fechas": {}, "added": datetime.now().isoformat()}
         save_urls(urls)
         return f"✅ Agregado:\n<b>{name}</b>\n{url}\n\nEmpezaré a monitorearlo de inmediato."
 
@@ -270,8 +289,8 @@ def handle_command(text: str, urls: dict) -> str:
             "/list — Ver todas las URLs activas\n"
             "/check — Forzar chequeo ahora mismo\n"
             "/help — Ver esta ayuda\n\n"
-            "AllAccess: chequea cada 5 minutos\n"
-            "Movistar Arena: chequea cada 20 minutos"
+            "AllAccess: cada 5 minutos\n"
+            "Movistar Arena: cada 20 minutos"
         )
 
     return f"❓ Comando no reconocido: {cmd}\nEscribí /help para ver los comandos."
@@ -300,31 +319,39 @@ def run_check(urls: dict, notify_no_change=False, force=False):
         data = urls[url]
         result = check_url(url)
         new_status  = result["status"]
-        prev_status = data.get("last_status", "unknown")
         name        = data["name"]
+        nuevas_fechas = result.get("fechas", {})
+        fechas_prev   = data.get("fechas", {})
 
         log.info(f"  [{new_status}] {name}")
 
-        if new_status == "available" and prev_status != "available":
-            changed.append((url, name, new_status, result["snippet"]))
+        # Detectar fechas nuevas que pasaron a available
+        nuevas_disponibles = []
+        for fecha, estado in nuevas_fechas.items():
+            if estado == "available" and fechas_prev.get(fecha) != "available":
+                nuevas_disponibles.append(fecha)
+
+        if nuevas_disponibles:
+            changed.append((url, name, nuevas_disponibles))
         elif new_status == "error":
             log.warning(f"  Error en {url}: {result['snippet']}")
             errors.append((name, result["snippet"]))
 
         urls[url]["last_status"] = new_status
+        urls[url]["fechas"] = nuevas_fechas
         urls[url]["last_check"] = now
 
     save_urls(urls)
 
-    for url, name, status, snippet in changed:
+    for url, name, fechas_nuevas in changed:
         msg = (
             f"🚨 <b>¡ENTRADAS DISPONIBLES!</b>\n\n"
             f"🎫 <b>{name}</b>\n"
-            f"🔍 Detecté: <i>{snippet}</i>\n\n"
+            f"🗓 <i>{', '.join(fechas_nuevas)}</i>\n\n"
             f"👉 <a href='{url}'>Comprá acá</a>"
         )
         send_telegram(msg)
-        log.info(f"  ✅ Alerta enviada: {name}")
+        log.info(f"  ✅ Alerta enviada: {name} - {fechas_nuevas}")
 
     for name, snippet in errors:
         send_telegram(
@@ -365,7 +392,6 @@ def main():
 
         run_check(urls)
 
-        # Aviso de vida diario a las 9am Argentina
         hora_actual = datetime.utcnow().hour - 3
         if hora_actual < 0:
             hora_actual += 24
