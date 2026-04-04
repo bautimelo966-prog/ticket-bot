@@ -109,21 +109,19 @@ def check_movistar_arena(url: str) -> dict:
 
             # Buscar todos los botones de fechas disponibles (verdes)
             fecha_buttons = page.query_selector_all("button.dia-evento:not(.mud-theme-secondary)")
-            
+
             disponibles = []
 
             for btn in fecha_buttons:
                 try:
                     btn.click()
-                    page.wait_for_timeout(1500)  # esperar que actualice
+                    page.wait_for_timeout(1500)
 
-                    # Buscar botones de tickets que NO estén deshabilitados
                     ticket_buttons = page.query_selector_all("button:not(.btn-disabled) span.mud-button-label")
-                    
+
                     for tb in ticket_buttons:
                         texto = tb.inner_text().strip().lower()
                         if "seleccionar" in texto:
-                            # Obtener qué fecha es
                             day_style = btn.get_attribute("style") or ""
                             disponibles.append(day_style)
                             break
@@ -135,7 +133,7 @@ def check_movistar_arena(url: str) -> dict:
 
         if disponibles:
             return {"status": "available", "snippet": f"Fechas con entradas: {', '.join(disponibles)}"}
-        
+
         return {"status": "sold_out", "snippet": "agotado"}
 
     except Exception as e:
@@ -144,30 +142,6 @@ def check_movistar_arena(url: str) -> dict:
 
 # ── Chequeo de página ──────────────────────────────────────────────────────
 def check_url(url: str) -> dict:
-    from playwright.sync_api import sync_playwright
-
-def check_allaccess(url: str) -> dict:
-    if "allaccess.com.ar" in url:
-    return check_allaccess(url)
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-
-            page.goto(url, timeout=30000)
-            page.wait_for_timeout(5000)
-
-            content = page.content().lower()
-
-            if "ver entradas" in content:
-                browser.close()
-                return {"status": "available", "snippet": "ver entradas"}
-
-            browser.close()
-            return {"status": "sold_out", "snippet": "no disponible"}
-
-    except Exception as e:
-        return {"status": "error", "snippet": str(e)}
     if "movistararena.com.ar" in url:
         return check_movistar_arena(url)
 
