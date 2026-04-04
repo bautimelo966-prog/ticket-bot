@@ -108,7 +108,7 @@ def check_movistar_arena(url: str) -> dict:
             page.wait_for_load_state("networkidle", timeout=20000)
 
             # Buscar todos los botones de fechas disponibles (verdes)
-            fecha_buttons = page.query_selector_all("button.dia-evento:not(.mud-theme-secondary)")
+            fecha_buttons = page.query_selector_all("button.dia-evento")
 
             disponibles = []
 
