@@ -15,8 +15,11 @@ log = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-CHECK_INTERVAL   = int(os.getenv("CHECK_INTERVAL", "1200"))
 URLS_FILE        = "urls.json"
+
+CHECK_INTERVAL_MOVISTAR  = 1200  # 20 minutos
+CHECK_INTERVAL_ALLACCESS = 300   # 5 minutos
+CHECK_INTERVAL_DEFAULT   = 1200  # 20 minutos para otros
 
 KEYWORDS_AVAILABLE = [
     "comprar", "compra", "comprá", "buy", "agregar al carrito",
@@ -78,6 +81,13 @@ def get_telegram_updates(offset: int) -> list:
     except Exception as e:
         log.error(f"Error obteniendo updates: {e}")
         return []
+
+def get_interval(url: str) -> int:
+    if "movistararena.com.ar" in url:
+        return CHECK_INTERVAL_MOVISTAR
+    if "allaccess.com.ar" in url:
+        return CHECK_INTERVAL_ALLACCESS
+    return CHECK_INTERVAL_DEFAULT
 
 def check_allaccess(url: str) -> dict:
     try:
@@ -222,7 +232,7 @@ def handle_command(text: str, urls: dict) -> str:
             return "⚠️ La URL debe empezar con http:// o https://"
         if len(urls) >= 20:
             return "⚠️ Límite de 20 URLs alcanzado."
-        urls[url] = {"name": name, "last_status": "unknown", "added": datetime.now().isoformat()}
+        urls[url] = {"name": name, "last_status": "unknown", "last_check": 0, "added": datetime.now().isoformat()}
         save_urls(urls)
         return f"✅ Agregado:\n<b>{name}</b>\n{url}\n\nEmpezaré a monitorearlo de inmediato."
 
@@ -260,20 +270,34 @@ def handle_command(text: str, urls: dict) -> str:
             "/list — Ver todas las URLs activas\n"
             "/check — Forzar chequeo ahora mismo\n"
             "/help — Ver esta ayuda\n\n"
-            "El bot chequea automáticamente cada 20 minutos."
+            "AllAccess: chequea cada 5 minutos\n"
+            "Movistar Arena: chequea cada 20 minutos"
         )
 
     return f"❓ Comando no reconocido: {cmd}\nEscribí /help para ver los comandos."
 
-def run_check(urls: dict, notify_no_change=False):
+def run_check(urls: dict, notify_no_change=False, force=False):
     if not urls:
         return
 
-    log.info(f"Chequeando {len(urls)} URLs...")
+    now = time.time()
+    urls_to_check = []
+
+    for url, data in urls.items():
+        interval = get_interval(url)
+        last_check = data.get("last_check", 0)
+        if force or (now - last_check >= interval):
+            urls_to_check.append(url)
+
+    if not urls_to_check:
+        return
+
+    log.info(f"Chequeando {len(urls_to_check)} URLs...")
     changed = []
     errors = []
 
-    for url, data in urls.items():
+    for url in urls_to_check:
+        data = urls[url]
         result = check_url(url)
         new_status  = result["status"]
         prev_status = data.get("last_status", "unknown")
@@ -288,6 +312,7 @@ def run_check(urls: dict, notify_no_change=False):
             errors.append((name, result["snippet"]))
 
         urls[url]["last_status"] = new_status
+        urls[url]["last_check"] = now
 
     save_urls(urls)
 
@@ -301,7 +326,6 @@ def run_check(urls: dict, notify_no_change=False):
         send_telegram(msg)
         log.info(f"  ✅ Alerta enviada: {name}")
 
-    # Avisar errores por Telegram
     for name, snippet in errors:
         send_telegram(
             f"⚠️ <b>Error chequeando {name}</b>\n\n"
@@ -322,7 +346,6 @@ def main():
     )
 
     urls = load_urls()
-    last_check = 0
     last_daily = 0
     offset = 0
 
@@ -336,21 +359,17 @@ def main():
                 response = handle_command(text, urls)
                 if response == "__force_check__":
                     send_telegram("🔄 Chequeando ahora...")
-                    run_check(urls, notify_no_change=True)
+                    run_check(urls, notify_no_change=True, force=True)
                 else:
                     send_telegram(response)
 
-        now = time.time()
+        run_check(urls)
 
-        # Chequeo automático cada 20 minutos
-        if now - last_check >= CHECK_INTERVAL:
-            run_check(urls)
-            last_check = now
-
-        # Aviso de vida diario a las 9am (hora Argentina = UTC-3)
+        # Aviso de vida diario a las 9am Argentina
         hora_actual = datetime.utcnow().hour - 3
         if hora_actual < 0:
             hora_actual += 24
+        now = time.time()
         if hora_actual == 9 and now - last_daily >= 86400:
             total = len(urls)
             nombres = ", ".join([data["name"] for data in urls.values()]) if urls else "ninguno"
