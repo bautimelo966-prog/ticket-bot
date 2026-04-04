@@ -7,17 +7,15 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
-# ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 log = logging.getLogger(__name__)
 
-# ── Config ─────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-CHECK_INTERVAL   = int(os.getenv("CHECK_INTERVAL", "1200"))  # 20 minutos
+CHECK_INTERVAL   = int(os.getenv("CHECK_INTERVAL", "1200"))
 URLS_FILE        = "urls.json"
 
 KEYWORDS_AVAILABLE = [
@@ -47,7 +45,6 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# ── Manejo de URLs ─────────────────────────────────────────────────────────
 def load_urls() -> dict:
     if os.path.exists(URLS_FILE):
         with open(URLS_FILE, "r", encoding="utf-8") as f:
@@ -58,7 +55,6 @@ def save_urls(data: dict):
     with open(URLS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ── Telegram ───────────────────────────────────────────────────────────────
 def send_telegram(text: str, parse_mode="HTML"):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -83,7 +79,6 @@ def get_telegram_updates(offset: int) -> list:
         log.error(f"Error obteniendo updates: {e}")
         return []
 
-# ── Movistar Arena (Playwright) ────────────────────────────────────────────
 def check_movistar_arena(url: str) -> dict:
     email    = os.environ.get("MOVISTAR_EMAIL", "")
     password = os.environ.get("MOVISTAR_PASSWORD", "")
@@ -106,6 +101,7 @@ def check_movistar_arena(url: str) -> dict:
             page.wait_for_load_state("networkidle", timeout=20000)
 
             fecha_buttons = page.query_selector_all("button.dia-evento")
+            log.info(f"Fechas encontradas: {len(fecha_buttons)}")
             disponibles = []
 
             for btn in fecha_buttons:
@@ -113,13 +109,16 @@ def check_movistar_arena(url: str) -> dict:
                     btn.click()
                     page.wait_for_timeout(1500)
                     ticket_buttons = page.query_selector_all("span.mud-button-label")
+                    textos = [tb.inner_text().strip() for tb in ticket_buttons]
+                    log.info(f"Textos botones: {textos}")
                     for tb in ticket_buttons:
                         texto = tb.inner_text().strip().lower()
                         if "seleccionar" in texto:
                             day_style = btn.get_attribute("style") or ""
                             disponibles.append(day_style)
                             break
-                except Exception:
+                except Exception as ex:
+                    log.warning(f"Error en fecha: {ex}")
                     continue
 
             browser.close()
@@ -132,7 +131,6 @@ def check_movistar_arena(url: str) -> dict:
         log.error(f"Error Playwright: {e}")
         return {"status": "error", "snippet": str(e)}
 
-# ── Chequeo de página ──────────────────────────────────────────────────────
 def check_url(url: str) -> dict:
     if "movistararena.com.ar" in url:
         return check_movistar_arena(url)
@@ -162,7 +160,6 @@ def check_url(url: str) -> dict:
     except Exception as e:
         return {"status": "error", "snippet": str(e)}
 
-# ── Procesamiento de comandos Telegram ────────────────────────────────────
 def handle_command(text: str, urls: dict) -> str:
     parts = text.strip().split(maxsplit=2)
     cmd = parts[0].lower()
@@ -219,7 +216,6 @@ def handle_command(text: str, urls: dict) -> str:
 
     return f"❓ Comando no reconocido: {cmd}\nEscribí /help para ver los comandos."
 
-# ── Loop principal ─────────────────────────────────────────────────────────
 def run_check(urls: dict, notify_no_change=False):
     if not urls:
         return
