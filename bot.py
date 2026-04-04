@@ -87,7 +87,6 @@ def check_allaccess(url: str) -> dict:
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
 
-            # Buscar el botón de compra
             buy_button = page.query_selector("button#buyButton")
             soldout = page.query_selector("div.event-status.status-soldout")
 
@@ -124,7 +123,6 @@ def check_movistar_arena(url: str) -> dict:
 
             disponibles = []
 
-            # Intentar formato calendario (Arjona)
             try:
                 page.wait_for_selector("button.dia-evento", timeout=8000)
                 fecha_buttons = page.query_selector_all("button.dia-evento")
@@ -150,7 +148,6 @@ def check_movistar_arena(url: str) -> dict:
                         continue
 
             except Exception:
-                # Formato lista directa (Calamaro)
                 log.info("Sin calendario, usando formato lista")
                 filas = page.query_selector_all("div.evento-row")
                 log.info(f"Filas encontradas: {len(filas)}")
@@ -274,6 +271,7 @@ def run_check(urls: dict, notify_no_change=False):
 
     log.info(f"Chequeando {len(urls)} URLs...")
     changed = []
+    errors = []
 
     for url, data in urls.items():
         result = check_url(url)
@@ -287,6 +285,7 @@ def run_check(urls: dict, notify_no_change=False):
             changed.append((url, name, new_status, result["snippet"]))
         elif new_status == "error":
             log.warning(f"  Error en {url}: {result['snippet']}")
+            errors.append((name, result["snippet"]))
 
         urls[url]["last_status"] = new_status
 
@@ -302,6 +301,14 @@ def run_check(urls: dict, notify_no_change=False):
         send_telegram(msg)
         log.info(f"  ✅ Alerta enviada: {name}")
 
+    # Avisar errores por Telegram
+    for name, snippet in errors:
+        send_telegram(
+            f"⚠️ <b>Error chequeando {name}</b>\n\n"
+            f"<i>{snippet[:200]}</i>\n\n"
+            f"El bot seguirá intentando en el próximo chequeo."
+        )
+
     if notify_no_change and not changed:
         send_telegram("✅ Chequeo manual completado. Sin novedades por ahora.")
 
@@ -316,6 +323,7 @@ def main():
 
     urls = load_urls()
     last_check = 0
+    last_daily = 0
     offset = 0
 
     while True:
@@ -333,9 +341,25 @@ def main():
                     send_telegram(response)
 
         now = time.time()
+
+        # Chequeo automático cada 20 minutos
         if now - last_check >= CHECK_INTERVAL:
             run_check(urls)
             last_check = now
+
+        # Aviso de vida diario a las 9am (hora Argentina = UTC-3)
+        hora_actual = datetime.utcnow().hour - 3
+        if hora_actual < 0:
+            hora_actual += 24
+        if hora_actual == 9 and now - last_daily >= 86400:
+            total = len(urls)
+            nombres = ", ".join([data["name"] for data in urls.values()]) if urls else "ninguno"
+            send_telegram(
+                f"🟢 <b>Bot activo</b>\n\n"
+                f"Estoy funcionando correctamente.\n"
+                f"Monitoreando {total} evento(s): {nombres}"
+            )
+            last_daily = now
 
         time.sleep(2)
 
