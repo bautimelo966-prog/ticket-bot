@@ -100,49 +100,63 @@ def check_movistar_arena(url: str) -> dict:
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
 
-            # Intentar esperar el calendario (Arjona) o los botones directos (Calamaro)
+            disponibles = []
+
+            # Intentar formato calendario (Arjona)
             try:
                 page.wait_for_selector("button.dia-evento", timeout=8000)
                 fecha_buttons = page.query_selector_all("button.dia-evento")
-            except Exception:
-                fecha_buttons = []
+                log.info(f"Fechas encontradas (calendario): {len(fecha_buttons)}")
 
-            log.info(f"Fechas encontradas: {len(fecha_buttons)}")
-            disponibles = []
+                # Obtener mes del encabezado
+                mes_header = page.query_selector(".mud-picker-calendar-header-transition")
+                mes_texto = mes_header.inner_text().strip() if mes_header else ""
+                log.info(f"Mes: {mes_texto}")
 
-            if fecha_buttons:
-                # Formato con calendario (ej: Arjona)
                 for btn in fecha_buttons:
                     try:
                         btn.click()
                         page.wait_for_timeout(1500)
                         ticket_buttons = page.query_selector_all("span.mud-button-label")
-                        textos = [tb.inner_text().strip() for tb in ticket_buttons]
-                        log.info(f"Textos botones: {textos}")
                         for tb in ticket_buttons:
                             texto = tb.inner_text().strip().lower()
                             if "seleccionar" in texto or "comprar" in texto:
-                                day_style = btn.get_attribute("style") or ""
-                                disponibles.append(day_style)
+                                # Leer el número del día del botón
+                                dia_el = btn.query_selector("p")
+                                dia = dia_el.inner_text().strip() if dia_el else "?"
+                                disponibles.append(f"{dia} de {mes_texto}")
                                 break
                     except Exception as ex:
                         log.warning(f"Error en fecha: {ex}")
                         continue
-            else:
-                # Formato sin calendario (ej: Calamaro)
-                ticket_buttons = page.query_selector_all("span.mud-button-label")
-                textos = [tb.inner_text().strip() for tb in ticket_buttons]
-                log.info(f"Textos botones directos: {textos}")
-                for tb in ticket_buttons:
-                    texto = tb.inner_text().strip().lower()
-                    if "seleccionar" in texto or "comprar" in texto:
-                        disponibles.append(texto)
-                        break
+
+            except Exception:
+                # Formato lista directa (Calamaro)
+                log.info("Sin calendario, usando formato lista")
+                filas = page.query_selector_all("div.evento-row")
+                log.info(f"Filas encontradas: {len(filas)}")
+
+                for fila in filas:
+                    try:
+                        ticket_buttons = fila.query_selector_all("span.mud-button-label")
+                        for tb in ticket_buttons:
+                            texto = tb.inner_text().strip().lower()
+                            if "seleccionar" in texto or "comprar" in texto:
+                                # Leer día y mes de la fila
+                                dia_el = fila.query_selector("div.fecha p")
+                                mes_el = fila.query_selector("div.fecha span")
+                                dia = dia_el.inner_text().strip() if dia_el else "?"
+                                mes = mes_el.inner_text().strip() if mes_el else "?"
+                                disponibles.append(f"{dia} de {mes}")
+                                break
+                    except Exception as ex:
+                        log.warning(f"Error en fila: {ex}")
+                        continue
 
             browser.close()
 
         if disponibles:
-            return {"status": "available", "snippet": f"Fechas con entradas: {', '.join(disponibles)}"}
+            return {"status": "available", "snippet": f"Fechas disponibles: {', '.join(disponibles)}"}
         return {"status": "sold_out", "snippet": "agotado"}
 
     except Exception as e:
