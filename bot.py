@@ -99,6 +99,7 @@ def check_movistar_arena(url: str) -> dict:
 
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
+            page.wait_for_selector("button.dia-evento", timeout=15000)
 
             fecha_buttons = page.query_selector_all("button.dia-evento")
             log.info(f"Fechas encontradas: {len(fecha_buttons)}")
