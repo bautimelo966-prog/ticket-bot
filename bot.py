@@ -99,28 +99,45 @@ def check_movistar_arena(url: str) -> dict:
 
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
-            page.wait_for_selector("button.dia-evento", timeout=15000)
 
-            fecha_buttons = page.query_selector_all("button.dia-evento")
+            # Intentar esperar el calendario (Arjona) o los botones directos (Calamaro)
+            try:
+                page.wait_for_selector("button.dia-evento", timeout=8000)
+                fecha_buttons = page.query_selector_all("button.dia-evento")
+            except Exception:
+                fecha_buttons = []
+
             log.info(f"Fechas encontradas: {len(fecha_buttons)}")
             disponibles = []
 
-            for btn in fecha_buttons:
-                try:
-                    btn.click()
-                    page.wait_for_timeout(1500)
-                    ticket_buttons = page.query_selector_all("span.mud-button-label")
-                    textos = [tb.inner_text().strip() for tb in ticket_buttons]
-                    log.info(f"Textos botones: {textos}")
-                    for tb in ticket_buttons:
-                        texto = tb.inner_text().strip().lower()
-                        if "seleccionar" in texto:
-                            day_style = btn.get_attribute("style") or ""
-                            disponibles.append(day_style)
-                            break
-                except Exception as ex:
-                    log.warning(f"Error en fecha: {ex}")
-                    continue
+            if fecha_buttons:
+                # Formato con calendario (ej: Arjona)
+                for btn in fecha_buttons:
+                    try:
+                        btn.click()
+                        page.wait_for_timeout(1500)
+                        ticket_buttons = page.query_selector_all("span.mud-button-label")
+                        textos = [tb.inner_text().strip() for tb in ticket_buttons]
+                        log.info(f"Textos botones: {textos}")
+                        for tb in ticket_buttons:
+                            texto = tb.inner_text().strip().lower()
+                            if "seleccionar" in texto or "comprar" in texto:
+                                day_style = btn.get_attribute("style") or ""
+                                disponibles.append(day_style)
+                                break
+                    except Exception as ex:
+                        log.warning(f"Error en fecha: {ex}")
+                        continue
+            else:
+                # Formato sin calendario (ej: Calamaro)
+                ticket_buttons = page.query_selector_all("span.mud-button-label")
+                textos = [tb.inner_text().strip() for tb in ticket_buttons]
+                log.info(f"Textos botones directos: {textos}")
+                for tb in ticket_buttons:
+                    texto = tb.inner_text().strip().lower()
+                    if "seleccionar" in texto or "comprar" in texto:
+                        disponibles.append(texto)
+                        break
 
             browser.close()
 
