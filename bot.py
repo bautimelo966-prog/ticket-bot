@@ -97,14 +97,47 @@ def check_allaccess(url: str) -> dict:
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
 
-            buy_button = page.query_selector("button#buyButton")
-            soldout = page.query_selector("div.event-status.status-soldout")
+            fechas_estado = {}
+
+            # Abrir el dropdown de fechas
+            try:
+                page.click("div.dropdown", timeout=5000)
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+            # Leer todas las fechas del dropdown
+            items = page.query_selector_all("ul#show-dropdown li")
+            log.info(f"AllAccess fechas encontradas: {len(items)}")
+
+            for item in items:
+                try:
+                    clase = item.get_attribute("class") or ""
+                    texto_el = item.query_selector("div")
+                    texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
+                    # Limpiar el texto — quedarnos solo con la fecha
+                    fecha_label = texto.split("\n")[0].strip()
+                    if not fecha_label:
+                        continue
+                    if "agotado" in clase.lower():
+                        fechas_estado[fecha_label] = "sold_out"
+                    else:
+                        fechas_estado[fecha_label] = "available"
+                    log.info(f"  AllAccess {fecha_label}: {fechas_estado[fecha_label]}")
+                except Exception as ex:
+                    log.warning(f"Error leyendo fecha AllAccess: {ex}")
+                    continue
 
             browser.close()
 
-        if buy_button and not soldout:
-            return {"status": "available", "snippet": "Ver entradas", "fechas": {}}
-        return {"status": "sold_out", "snippet": "agotado", "fechas": {}}
+        disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+        if disponibles:
+            return {
+                "status": "available",
+                "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
+                "fechas": fechas_estado
+            }
+        return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
 
     except Exception as e:
         log.error(f"Error AllAccess: {e}")
@@ -131,7 +164,6 @@ def check_movistar_arena(url: str) -> dict:
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
 
-            # fechas_estado = {"19 de mayo": "available", "23 de mayo": "sold_out", ...}
             fechas_estado = {}
 
             try:
@@ -159,7 +191,7 @@ def check_movistar_arena(url: str) -> dict:
                                 break
 
                         fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
-                        log.info(f"  {fecha_label}: {'available' if tiene_disponible else 'sold_out'}")
+                        log.info(f"  {fecha_label}: {fechas_estado[fecha_label]}")
 
                     except Exception as ex:
                         log.warning(f"Error en fecha: {ex}")
@@ -186,7 +218,7 @@ def check_movistar_arena(url: str) -> dict:
                                 break
 
                         fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
-                        log.info(f"  {fecha_label}: {'available' if tiene_disponible else 'sold_out'}")
+                        log.info(f"  {fecha_label}: {fechas_estado[fecha_label]}")
 
                     except Exception as ex:
                         log.warning(f"Error en fila: {ex}")
@@ -318,14 +350,13 @@ def run_check(urls: dict, notify_no_change=False, force=False):
     for url in urls_to_check:
         data = urls[url]
         result = check_url(url)
-        new_status  = result["status"]
-        name        = data["name"]
+        new_status    = result["status"]
+        name          = data["name"]
         nuevas_fechas = result.get("fechas", {})
         fechas_prev   = data.get("fechas", {})
 
         log.info(f"  [{new_status}] {name}")
 
-        # Detectar fechas nuevas que pasaron a available
         nuevas_disponibles = []
         for fecha, estado in nuevas_fechas.items():
             if estado == "available" and fechas_prev.get(fecha) != "available":
