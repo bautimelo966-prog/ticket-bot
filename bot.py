@@ -79,6 +79,28 @@ def get_telegram_updates(offset: int) -> list:
         log.error(f"Error obteniendo updates: {e}")
         return []
 
+def check_allaccess(url: str) -> dict:
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+
+            # Buscar el botón de compra
+            buy_button = page.query_selector("button#buyButton")
+            soldout = page.query_selector("div.event-status.status-soldout")
+
+            browser.close()
+
+        if buy_button and not soldout:
+            return {"status": "available", "snippet": "Ver entradas"}
+        return {"status": "sold_out", "snippet": "agotado"}
+
+    except Exception as e:
+        log.error(f"Error AllAccess: {e}")
+        return {"status": "error", "snippet": str(e)}
+
 def check_movistar_arena(url: str) -> dict:
     email    = os.environ.get("MOVISTAR_EMAIL", "")
     password = os.environ.get("MOVISTAR_PASSWORD", "")
@@ -108,10 +130,8 @@ def check_movistar_arena(url: str) -> dict:
                 fecha_buttons = page.query_selector_all("button.dia-evento")
                 log.info(f"Fechas encontradas (calendario): {len(fecha_buttons)}")
 
-                # Obtener mes del encabezado
                 mes_header = page.query_selector(".mud-picker-calendar-header-transition")
                 mes_texto = mes_header.inner_text().strip() if mes_header else ""
-                log.info(f"Mes: {mes_texto}")
 
                 for btn in fecha_buttons:
                     try:
@@ -121,7 +141,6 @@ def check_movistar_arena(url: str) -> dict:
                         for tb in ticket_buttons:
                             texto = tb.inner_text().strip().lower()
                             if "seleccionar" in texto or "comprar" in texto:
-                                # Leer el número del día del botón
                                 dia_el = btn.query_selector("p")
                                 dia = dia_el.inner_text().strip() if dia_el else "?"
                                 disponibles.append(f"{dia} de {mes_texto}")
@@ -142,7 +161,6 @@ def check_movistar_arena(url: str) -> dict:
                         for tb in ticket_buttons:
                             texto = tb.inner_text().strip().lower()
                             if "seleccionar" in texto or "comprar" in texto:
-                                # Leer día y mes de la fila
                                 dia_el = fila.query_selector("div.fecha p")
                                 mes_el = fila.query_selector("div.fecha span")
                                 dia = dia_el.inner_text().strip() if dia_el else "?"
@@ -166,6 +184,8 @@ def check_movistar_arena(url: str) -> dict:
 def check_url(url: str) -> dict:
     if "movistararena.com.ar" in url:
         return check_movistar_arena(url)
+    if "allaccess.com.ar" in url:
+        return check_allaccess(url)
 
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
