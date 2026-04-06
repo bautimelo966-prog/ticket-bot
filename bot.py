@@ -99,14 +99,12 @@ def check_allaccess(url: str) -> dict:
 
             fechas_estado = {}
 
-            # Abrir el dropdown de fechas
             try:
                 page.click("div.dropdown", timeout=5000)
                 page.wait_for_timeout(1000)
             except Exception:
                 pass
 
-            # Leer todas las fechas del dropdown
             items = page.query_selector_all("ul#show-dropdown li")
             log.info(f"AllAccess fechas encontradas: {len(items)}")
 
@@ -115,7 +113,6 @@ def check_allaccess(url: str) -> dict:
                     clase = item.get_attribute("class") or ""
                     texto_el = item.query_selector("div")
                     texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
-                    # Limpiar el texto — quedarnos solo con la fecha
                     fecha_label = texto.split("\n")[0].strip()
                     if not fecha_label:
                         continue
@@ -346,6 +343,7 @@ def run_check(urls: dict, notify_no_change=False, force=False):
     log.info(f"Chequeando {len(urls_to_check)} URLs...")
     changed = []
     errors = []
+    resumen = []
 
     for url in urls_to_check:
         data = urls[url]
@@ -367,6 +365,13 @@ def run_check(urls: dict, notify_no_change=False, force=False):
         elif new_status == "error":
             log.warning(f"  Error en {url}: {result['snippet']}")
             errors.append((name, result["snippet"]))
+
+        # Armar resumen para /check manual
+        disponibles_actuales = [f for f, s in nuevas_fechas.items() if s == "available"]
+        if disponibles_actuales:
+            resumen.append(f"🟢 <b>{name}</b>: {', '.join(disponibles_actuales)}")
+        else:
+            resumen.append(f"🔴 <b>{name}</b>: sin entradas")
 
         urls[url]["last_status"] = new_status
         urls[url]["fechas"] = nuevas_fechas
@@ -391,8 +396,12 @@ def run_check(urls: dict, notify_no_change=False, force=False):
             f"El bot seguirá intentando en el próximo chequeo."
         )
 
-    if notify_no_change and not changed:
-        send_telegram("✅ Chequeo manual completado. Sin novedades por ahora.")
+    if notify_no_change:
+        if resumen:
+            msg = "📋 <b>Estado actual:</b>\n\n" + "\n".join(resumen)
+        else:
+            msg = "✅ Chequeo manual completado. Sin novedades por ahora."
+        send_telegram(msg)
 
 
 def main():
