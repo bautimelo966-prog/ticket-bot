@@ -87,6 +87,8 @@ def get_interval(url: str) -> int:
         return CHECK_INTERVAL_MOVISTAR
     if "allaccess.com.ar" in url:
         return CHECK_INTERVAL_ALLACCESS
+    if "enigmatickets.com" in url:
+        return CHECK_INTERVAL_ALLACCESS  # cada 5 minutos
     return CHECK_INTERVAL_DEFAULT
 
 def check_allaccess(url: str) -> dict:
@@ -138,6 +140,75 @@ def check_allaccess(url: str) -> dict:
 
     except Exception as e:
         log.error(f"Error AllAccess: {e}")
+        return {"status": "error", "snippet": str(e), "fechas": {}}
+
+def check_enigmatickets(url: str) -> dict:
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+
+            fechas_estado = {}
+
+            # Buscar todas las filas de fases de venta
+            filas = page.query_selector_all("div.flex.h-\\[40px\\].items-center.pl-3.pr-3.justify-between")
+            log.info(f"Enigma fases encontradas: {len(filas)}")
+
+            for fila in filas:
+                try:
+                    # Nombre de la fase
+                    nombre_el = fila.query_selector("span.truncate")
+                    nombre = nombre_el.inner_text().strip() if nombre_el else "Fase desconocida"
+
+                    # Estado del botón
+                    estado_el = fila.query_selector("span[data-testid='text-component']")
+                    estado_texto = estado_el.inner_text().strip().lower() if estado_el else ""
+
+                    # Detectar color del botón para distinguir agotado/disponible
+                    btn_div = fila.query_selector("div.flex.justify-end div")
+                    clases = btn_div.get_attribute("class") if btn_div else ""
+
+                    log.info(f"  Enigma [{nombre}]: '{estado_texto}' | clases: {clases}")
+
+                    if "agotado" in estado_texto or "sold out" in estado_texto or "bg-red" in clases:
+                        fechas_estado[nombre] = "sold_out"
+                    elif any(kw in estado_texto for kw in ["comprar", "disponible", "compra", "buy"]):
+                        fechas_estado[nombre] = "available"
+                    else:
+                        fechas_estado[nombre] = "unknown"
+
+                except Exception as ex:
+                    log.warning(f"Error leyendo fila Enigma: {ex}")
+                    continue
+
+            # Fallback: si no encontró filas, usar el botón principal grande
+            if not fechas_estado:
+                log.info("Enigma: sin filas, usando botón principal")
+                todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
+                for span in todos_los_spans:
+                    texto = span.inner_text().strip().lower()
+                    if "agotado" in texto or "sold out" in texto:
+                        fechas_estado["General"] = "sold_out"
+                        break
+                    elif any(kw in texto for kw in ["comprar", "disponible", "buy"]):
+                        fechas_estado["General"] = "available"
+                        break
+
+            browser.close()
+
+        disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+        if disponibles:
+            return {
+                "status": "available",
+                "snippet": f"Fases disponibles: {', '.join(disponibles)}",
+                "fechas": fechas_estado
+            }
+        return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
+    except Exception as e:
+        log.error(f"Error Enigma Tickets: {e}")
         return {"status": "error", "snippet": str(e), "fechas": {}}
 
 def check_movistar_arena(url: str) -> dict:
@@ -241,6 +312,8 @@ def check_url(url: str) -> dict:
         return check_movistar_arena(url)
     if "allaccess.com.ar" in url:
         return check_allaccess(url)
+    if "enigmatickets.com" in url:
+        return check_enigmatickets(url)
 
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
@@ -318,7 +391,7 @@ def handle_command(text: str, urls: dict) -> str:
             "/list — Ver todas las URLs activas\n"
             "/check — Forzar chequeo ahora mismo\n"
             "/help — Ver esta ayuda\n\n"
-            "AllAccess: cada 5 minutos\n"
+            "AllAccess y Enigma: cada 5 minutos\n"
             "Movistar Arena: cada 20 minutos"
         )
 
@@ -366,7 +439,6 @@ def run_check(urls: dict, notify_no_change=False, force=False):
             log.warning(f"  Error en {url}: {result['snippet']}")
             errors.append((name, result["snippet"]))
 
-        # Armar resumen para /check manual
         disponibles_actuales = [f for f, s in nuevas_fechas.items() if s == "available"]
         if disponibles_actuales:
             resumen.append(f"🟢 <b>{name}</b>: {', '.join(disponibles_actuales)}")
