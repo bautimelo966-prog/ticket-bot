@@ -5,6 +5,7 @@ import logging
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from playwright.sync_api import sync_playwright
 
 logging.basicConfig(
@@ -20,6 +21,8 @@ URLS_FILE        = "urls.json"
 CHECK_INTERVAL_MOVISTAR  = 1200
 CHECK_INTERVAL_ALLACCESS = 300
 CHECK_INTERVAL_DEFAULT   = 1200
+
+PLAYWRIGHT_TIMEOUT = 90  # segundos máximos por chequeo con Playwright
 
 KEYWORDS_AVAILABLE = [
     "comprar", "compra", "comprá", "buy", "agregar al carrito",
@@ -91,220 +94,234 @@ def get_interval(url: str) -> int:
         return CHECK_INTERVAL_ALLACCESS  # cada 5 minutos
     return CHECK_INTERVAL_DEFAULT
 
+def run_with_timeout(fn, url: str) -> dict:
+    """Ejecuta fn(url) con un timeout máximo de PLAYWRIGHT_TIMEOUT segundos."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn, url)
+        try:
+            return future.result(timeout=PLAYWRIGHT_TIMEOUT)
+        except FuturesTimeoutError:
+            log.error(f"Timeout ({PLAYWRIGHT_TIMEOUT}s) alcanzado para: {url}")
+            return {"status": "error", "snippet": f"Timeout: el chequeo tardó más de {PLAYWRIGHT_TIMEOUT} segundos", "fechas": {}}
+        except Exception as e:
+            log.error(f"Error en run_with_timeout para {url}: {e}")
+            return {"status": "error", "snippet": str(e), "fechas": {}}
+
+def _check_allaccess(url: str) -> dict:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+
+        fechas_estado = {}
+
+        try:
+            page.click("div.dropdown", timeout=5000)
+            page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        items = page.query_selector_all("ul#show-dropdown li")
+        log.info(f"AllAccess fechas encontradas: {len(items)}")
+
+        for item in items:
+            try:
+                clase = item.get_attribute("class") or ""
+                texto_el = item.query_selector("div")
+                texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
+                fecha_label = texto.split("\n")[0].strip()
+                if not fecha_label:
+                    continue
+                if "agotado" in clase.lower():
+                    fechas_estado[fecha_label] = "sold_out"
+                else:
+                    fechas_estado[fecha_label] = "available"
+                log.info(f"  AllAccess {fecha_label}: {fechas_estado[fecha_label]}")
+            except Exception as ex:
+                log.warning(f"Error leyendo fecha AllAccess: {ex}")
+                continue
+
+        browser.close()
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
 def check_allaccess(url: str) -> dict:
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=20000)
-
-            fechas_estado = {}
-
-            try:
-                page.click("div.dropdown", timeout=5000)
-                page.wait_for_timeout(1000)
-            except Exception:
-                pass
-
-            items = page.query_selector_all("ul#show-dropdown li")
-            log.info(f"AllAccess fechas encontradas: {len(items)}")
-
-            for item in items:
-                try:
-                    clase = item.get_attribute("class") or ""
-                    texto_el = item.query_selector("div")
-                    texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
-                    fecha_label = texto.split("\n")[0].strip()
-                    if not fecha_label:
-                        continue
-                    if "agotado" in clase.lower():
-                        fechas_estado[fecha_label] = "sold_out"
-                    else:
-                        fechas_estado[fecha_label] = "available"
-                    log.info(f"  AllAccess {fecha_label}: {fechas_estado[fecha_label]}")
-                except Exception as ex:
-                    log.warning(f"Error leyendo fecha AllAccess: {ex}")
-                    continue
-
-            browser.close()
-
-        disponibles = [f for f, s in fechas_estado.items() if s == "available"]
-        if disponibles:
-            return {
-                "status": "available",
-                "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
-                "fechas": fechas_estado
-            }
-        return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
-
+        return run_with_timeout(_check_allaccess, url)
     except Exception as e:
         log.error(f"Error AllAccess: {e}")
         return {"status": "error", "snippet": str(e), "fechas": {}}
 
+def _check_enigmatickets(url: str) -> dict:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(url, timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+
+        fechas_estado = {}
+
+        filas = page.query_selector_all("div.flex.h-\\[40px\\].items-center.pl-3.pr-3.justify-between")
+        log.info(f"Enigma fases encontradas: {len(filas)}")
+
+        for fila in filas:
+            try:
+                nombre_el = fila.query_selector("span.truncate")
+                nombre = nombre_el.inner_text().strip() if nombre_el else "Fase desconocida"
+
+                estado_el = fila.query_selector("span[data-testid='text-component']")
+                estado_texto = estado_el.inner_text().strip().lower() if estado_el else ""
+
+                btn_div = fila.query_selector("div.flex.justify-end div")
+                clases = btn_div.get_attribute("class") if btn_div else ""
+
+                log.info(f"  Enigma [{nombre}]: '{estado_texto}' | clases: {clases}")
+
+                if "agotado" in estado_texto or "sold out" in estado_texto or "bg-red" in clases:
+                    fechas_estado[nombre] = "sold_out"
+                elif any(kw in estado_texto for kw in ["comprar", "disponible", "compra", "buy"]):
+                    fechas_estado[nombre] = "available"
+                else:
+                    fechas_estado[nombre] = "unknown"
+
+            except Exception as ex:
+                log.warning(f"Error leyendo fila Enigma: {ex}")
+                continue
+
+        if not fechas_estado:
+            log.info("Enigma: sin filas, usando botón principal")
+            todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
+            for span in todos_los_spans:
+                texto = span.inner_text().strip().lower()
+                if "agotado" in texto or "sold out" in texto:
+                    fechas_estado["General"] = "sold_out"
+                    break
+                elif any(kw in texto for kw in ["comprar", "disponible", "buy"]):
+                    fechas_estado["General"] = "available"
+                    break
+
+        browser.close()
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Fases disponibles: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
 def check_enigmatickets(url: str) -> dict:
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=20000)
-
-            fechas_estado = {}
-
-            # Buscar todas las filas de fases de venta
-            filas = page.query_selector_all("div.flex.h-\\[40px\\].items-center.pl-3.pr-3.justify-between")
-            log.info(f"Enigma fases encontradas: {len(filas)}")
-
-            for fila in filas:
-                try:
-                    # Nombre de la fase
-                    nombre_el = fila.query_selector("span.truncate")
-                    nombre = nombre_el.inner_text().strip() if nombre_el else "Fase desconocida"
-
-                    # Estado del botón
-                    estado_el = fila.query_selector("span[data-testid='text-component']")
-                    estado_texto = estado_el.inner_text().strip().lower() if estado_el else ""
-
-                    # Detectar color del botón para distinguir agotado/disponible
-                    btn_div = fila.query_selector("div.flex.justify-end div")
-                    clases = btn_div.get_attribute("class") if btn_div else ""
-
-                    log.info(f"  Enigma [{nombre}]: '{estado_texto}' | clases: {clases}")
-
-                    if "agotado" in estado_texto or "sold out" in estado_texto or "bg-red" in clases:
-                        fechas_estado[nombre] = "sold_out"
-                    elif any(kw in estado_texto for kw in ["comprar", "disponible", "compra", "buy"]):
-                        fechas_estado[nombre] = "available"
-                    else:
-                        fechas_estado[nombre] = "unknown"
-
-                except Exception as ex:
-                    log.warning(f"Error leyendo fila Enigma: {ex}")
-                    continue
-
-            # Fallback: si no encontró filas, usar el botón principal grande
-            if not fechas_estado:
-                log.info("Enigma: sin filas, usando botón principal")
-                todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
-                for span in todos_los_spans:
-                    texto = span.inner_text().strip().lower()
-                    if "agotado" in texto or "sold out" in texto:
-                        fechas_estado["General"] = "sold_out"
-                        break
-                    elif any(kw in texto for kw in ["comprar", "disponible", "buy"]):
-                        fechas_estado["General"] = "available"
-                        break
-
-            browser.close()
-
-        disponibles = [f for f, s in fechas_estado.items() if s == "available"]
-        if disponibles:
-            return {
-                "status": "available",
-                "snippet": f"Fases disponibles: {', '.join(disponibles)}",
-                "fechas": fechas_estado
-            }
-        return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
-
+        return run_with_timeout(_check_enigmatickets, url)
     except Exception as e:
         log.error(f"Error Enigma Tickets: {e}")
         return {"status": "error", "snippet": str(e), "fechas": {}}
 
-def check_movistar_arena(url: str) -> dict:
+def _check_movistar_arena(url: str) -> dict:
     email    = os.environ.get("MOVISTAR_EMAIL", "")
     password = os.environ.get("MOVISTAR_PASSWORD", "")
 
     if not email or not password:
         return {"status": "error", "snippet": "Credenciales no configuradas", "fechas": {}}
 
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        page.goto("https://login.movistararena.com.ar/Account/Login", timeout=30000)
+        page.fill("#inputEmail", email)
+        page.fill("#inputPassword", password)
+        page.click("button.btn-login")
+        page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
+
+        page.goto(url, timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=20000)
+
+        fechas_estado = {}
+
+        try:
+            page.wait_for_selector("button.dia-evento", timeout=8000)
+            fecha_buttons = page.query_selector_all("button.dia-evento")
+            log.info(f"Fechas encontradas (calendario): {len(fecha_buttons)}")
+
+            mes_header = page.query_selector(".mud-picker-calendar-header-transition")
+            mes_texto = mes_header.inner_text().strip() if mes_header else ""
+
+            for btn in fecha_buttons:
+                try:
+                    btn.click()
+                    page.wait_for_timeout(1500)
+                    dia_el = btn.query_selector("p")
+                    dia = dia_el.inner_text().strip() if dia_el else "?"
+                    fecha_label = f"{dia} de {mes_texto}"
+
+                    ticket_buttons = page.query_selector_all("span.mud-button-label")
+                    tiene_disponible = False
+                    for tb in ticket_buttons:
+                        texto = tb.inner_text().strip().lower()
+                        if "seleccionar" in texto or "comprar" in texto:
+                            tiene_disponible = True
+                            break
+
+                    fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
+                    log.info(f"  {fecha_label}: {fechas_estado[fecha_label]}")
+
+                except Exception as ex:
+                    log.warning(f"Error en fecha: {ex}")
+                    continue
+
+        except Exception:
+            log.info("Sin calendario, usando formato lista")
+            filas = page.query_selector_all("div.evento-row")
+
+            for fila in filas:
+                try:
+                    dia_el = fila.query_selector("div.fecha p")
+                    mes_el = fila.query_selector("div.fecha span")
+                    dia = dia_el.inner_text().strip() if dia_el else "?"
+                    mes = mes_el.inner_text().strip() if mes_el else "?"
+                    fecha_label = f"{dia} de {mes}"
+
+                    ticket_buttons = fila.query_selector_all("span.mud-button-label")
+                    tiene_disponible = False
+                    for tb in ticket_buttons:
+                        texto = tb.inner_text().strip().lower()
+                        if "seleccionar" in texto or "comprar" in texto:
+                            tiene_disponible = True
+                            break
+
+                    fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
+                    log.info(f"  {fecha_label}: {fechas_estado[fecha_label]}")
+
+                except Exception as ex:
+                    log.warning(f"Error en fila: {ex}")
+                    continue
+
+        browser.close()
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
+def check_movistar_arena(url: str) -> dict:
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-
-            page.goto("https://login.movistararena.com.ar/Account/Login", timeout=30000)
-            page.fill("#inputEmail", email)
-            page.fill("#inputPassword", password)
-            page.click("button.btn-login")
-            page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
-
-            page.goto(url, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=20000)
-
-            fechas_estado = {}
-
-            try:
-                page.wait_for_selector("button.dia-evento", timeout=8000)
-                fecha_buttons = page.query_selector_all("button.dia-evento")
-                log.info(f"Fechas encontradas (calendario): {len(fecha_buttons)}")
-
-                mes_header = page.query_selector(".mud-picker-calendar-header-transition")
-                mes_texto = mes_header.inner_text().strip() if mes_header else ""
-
-                for btn in fecha_buttons:
-                    try:
-                        btn.click()
-                        page.wait_for_timeout(1500)
-                        dia_el = btn.query_selector("p")
-                        dia = dia_el.inner_text().strip() if dia_el else "?"
-                        fecha_label = f"{dia} de {mes_texto}"
-
-                        ticket_buttons = page.query_selector_all("span.mud-button-label")
-                        tiene_disponible = False
-                        for tb in ticket_buttons:
-                            texto = tb.inner_text().strip().lower()
-                            if "seleccionar" in texto or "comprar" in texto:
-                                tiene_disponible = True
-                                break
-
-                        fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
-                        log.info(f"  {fecha_label}: {fechas_estado[fecha_label]}")
-
-                    except Exception as ex:
-                        log.warning(f"Error en fecha: {ex}")
-                        continue
-
-            except Exception:
-                log.info("Sin calendario, usando formato lista")
-                filas = page.query_selector_all("div.evento-row")
-
-                for fila in filas:
-                    try:
-                        dia_el = fila.query_selector("div.fecha p")
-                        mes_el = fila.query_selector("div.fecha span")
-                        dia = dia_el.inner_text().strip() if dia_el else "?"
-                        mes = mes_el.inner_text().strip() if mes_el else "?"
-                        fecha_label = f"{dia} de {mes}"
-
-                        ticket_buttons = fila.query_selector_all("span.mud-button-label")
-                        tiene_disponible = False
-                        for tb in ticket_buttons:
-                            texto = tb.inner_text().strip().lower()
-                            if "seleccionar" in texto or "comprar" in texto:
-                                tiene_disponible = True
-                                break
-
-                        fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
-                        log.info(f"  {fecha_label}: {fechas_estado[fecha_label]}")
-
-                    except Exception as ex:
-                        log.warning(f"Error en fila: {ex}")
-                        continue
-
-            browser.close()
-
-        disponibles = [f for f, s in fechas_estado.items() if s == "available"]
-        if disponibles:
-            return {
-                "status": "available",
-                "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
-                "fechas": fechas_estado
-            }
-        return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
-
+        return run_with_timeout(_check_movistar_arena, url)
     except Exception as e:
-        log.error(f"Error Playwright: {e}")
+        log.error(f"Error Movistar Arena: {e}")
         return {"status": "error", "snippet": str(e), "fechas": {}}
 
 def check_url(url: str) -> dict:
