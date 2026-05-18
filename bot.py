@@ -25,12 +25,10 @@ URLS_FILE        = "urls.json"
 CHECK_INTERVAL_MOVISTAR  = 600    # 10 minutos
 CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
 CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
-PLAYWRIGHT_TIMEOUT       = 180    # 3 minutos — más tiempo para checker profundo con varias fechas
+PLAYWRIGHT_TIMEOUT       = 180    # 3 minutos
 
-# URL de Rosalía — checker profundo activado para esta URL
 ROSALIA_URL = "https://www.movistararena.com.ar/Ticketera/38f53ef6-e155-414d-a0ba-65fe089fdf5a"
 
-# Argumentos de Chrome para correr en contenedor Linux sin zygote
 CHROME_ARGS = [
     "--no-zygote",
     "--single-process",
@@ -121,7 +119,7 @@ def get_interval(url: str) -> int:
     return CHECK_INTERVAL_DEFAULT
 
 # ─────────────────────────────────────────────
-# Multiprocessing — mata Chrome si se cuelga
+# Multiprocessing
 # ─────────────────────────────────────────────
 
 def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: dict):
@@ -204,10 +202,6 @@ def _login_movistar(page):
     logging.info("[Movistar] Paso 4: Esperando redirección...")
     page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
     logging.info("[Movistar] Login exitoso")
-
-# ─────────────────────────────────────────────
-# Helper: obtener label de fecha desde botón del calendario
-# ─────────────────────────────────────────────
 
 def _get_mes_texto(page) -> str:
     try:
@@ -314,7 +308,6 @@ def _check_movistar_arena(url: str) -> dict:
 
 # ─────────────────────────────────────────────
 # Checker profundo Movistar Arena (Rosalía)
-# Re-busca botones del DOM después de cada go_back()
 # ─────────────────────────────────────────────
 
 def _check_movistar_profundo(url: str) -> dict:
@@ -335,14 +328,14 @@ def _check_movistar_profundo(url: str) -> dict:
 
             # Obtener cantidad de fechas y sus labels antes de empezar
             try:
-                page.wait_for_selector("button.dia-evento", timeout=8000)
+                # FIX: timeout=15000 para dar tiempo suficiente al calendario
+                page.wait_for_selector("button.dia-evento", timeout=15000)
                 fecha_buttons = page.query_selector_all("button.dia-evento")
                 total_fechas  = len(fecha_buttons)
                 logging.info(f"[Movistar-Profundo] {total_fechas} fechas encontradas")
 
                 mes_texto = _get_mes_texto(page)
 
-                # Obtener los días de cada botón antes de empezar el loop
                 dias = []
                 for btn in fecha_buttons:
                     try:
@@ -356,21 +349,19 @@ def _check_movistar_profundo(url: str) -> dict:
                 logging.warning(f"[Movistar-Profundo] Error buscando calendario: {ex}")
                 return {"status": "error", "snippet": str(ex), "fechas": {}}
 
-            # Procesar cada fecha por índice — re-busca botones después de cada vuelta
             for i in range(total_fechas):
                 fecha_label = f"{dias[i]} de {mes_texto}"
                 logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{total_fechas}: {fecha_label}")
 
                 try:
-                    # Re-buscar botones del calendario (DOM fresco después de go_back)
-                    page.wait_for_selector("button.dia-evento", timeout=8000)
+                    # FIX: timeout=15000 para dar tiempo al DOM después del go_back()
+                    page.wait_for_selector("button.dia-evento", timeout=15000)
                     fecha_buttons_fresh = page.query_selector_all("button.dia-evento")
 
                     if i >= len(fecha_buttons_fresh):
                         logging.warning(f"[Movistar-Profundo] Índice {i} fuera de rango, saltando")
                         continue
 
-                    # Click en la fecha
                     fecha_buttons_fresh[i].click()
                     page.wait_for_timeout(1500)
 
@@ -382,8 +373,6 @@ def _check_movistar_profundo(url: str) -> dict:
                         texto = tb.inner_text().strip().lower()
                         if "seleccionar" not in texto and "comprar" not in texto:
                             continue
-
-                        # Verificar que no sea VIP
                         try:
                             parent_text = tb.evaluate(
                                 "el => { let p = el.closest('div'); return p ? p.innerText : ''; }"
@@ -393,7 +382,6 @@ def _check_movistar_profundo(url: str) -> dict:
                                 continue
                         except Exception:
                             pass
-
                         btn_seleccionar = tb
                         break
 
@@ -402,13 +390,11 @@ def _check_movistar_profundo(url: str) -> dict:
                         fechas_estado[fecha_label] = "sold_out"
                         continue
 
-                    # Click en Seleccionar y esperar el mapa
                     logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
                     btn_seleccionar.click()
                     page.wait_for_load_state("networkidle", timeout=15000)
                     page.wait_for_timeout(2000)
 
-                    # Buscar sectores disponibles (esSector sin disabled)
                     sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
                     cant = len(sectores_disponibles)
                     logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
@@ -420,7 +406,6 @@ def _check_movistar_profundo(url: str) -> dict:
                         fechas_estado[fecha_label] = "sold_out"
                         logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris, sin entradas")
 
-                    # Volver al evento y esperar que el DOM se recargue
                     page.go_back()
                     page.wait_for_load_state("networkidle", timeout=15000)
                     page.wait_for_timeout(2000)
@@ -428,7 +413,6 @@ def _check_movistar_profundo(url: str) -> dict:
                 except Exception as ex:
                     logging.warning(f"[Movistar-Profundo] Error en fecha {i+1} ({fecha_label}): {ex}")
                     fechas_estado[fecha_label] = "unknown"
-                    # Intentar volver al evento para continuar
                     try:
                         page.goto(url, timeout=30000)
                         page.wait_for_load_state("networkidle", timeout=20000)
