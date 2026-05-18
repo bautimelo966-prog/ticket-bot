@@ -22,10 +22,13 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 URLS_FILE        = "urls.json"
 
-CHECK_INTERVAL_MOVISTAR  = 600   # 10 minutos
+CHECK_INTERVAL_MOVISTAR  = 600    # 10 minutos
 CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
 CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
-PLAYWRIGHT_TIMEOUT       = 90     # segundos máximos antes de matar el proceso
+PLAYWRIGHT_TIMEOUT       = 120    # segundos máximos (más tiempo para el checker profundo)
+
+# URL de Rosalía — checker profundo activado para esta URL
+ROSALIA_URL = "https://www.movistararena.com.ar/Ticketera/38f53ef6-e155-414d-a0ba-65fe089fdf5a"
 
 # Argumentos de Chrome para correr en contenedor Linux sin zygote
 CHROME_ARGS = [
@@ -122,7 +125,6 @@ def get_interval(url: str) -> int:
 # ─────────────────────────────────────────────
 
 def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: dict):
-    """Corre en proceso separado. Escribe resultado en result_queue."""
     for k, v in env.items():
         os.environ[k] = v
 
@@ -138,6 +140,8 @@ def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: di
             result = _check_enigmatickets(url)
         elif fn_name == "movistar":
             result = _check_movistar_arena(url)
+        elif fn_name == "movistar_profundo":
+            result = _check_movistar_profundo(url)
         else:
             result = {"status": "error", "snippet": f"Checker desconocido: {fn_name}", "fechas": {}}
         result_queue.put(result)
@@ -146,11 +150,6 @@ def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: di
 
 
 def run_with_timeout(fn_name: str, url: str) -> dict:
-    """
-    Ejecuta el checker en un proceso separado.
-    Si supera PLAYWRIGHT_TIMEOUT segundos, mata el proceso completo
-    (Chrome incluido) y retorna error sin bloquear el bot.
-    """
     env = dict(os.environ)
     result_queue = multiprocessing.Queue()
     process = multiprocessing.Process(
@@ -181,158 +180,45 @@ def run_with_timeout(fn_name: str, url: str) -> dict:
     }
 
 # ─────────────────────────────────────────────
-# Checkers internos (corren dentro del proceso hijo)
+# Login compartido (helper interno)
 # ─────────────────────────────────────────────
 
-def _check_allaccess(url: str) -> dict:
-    logging.info(f"[AllAccess] Iniciando chequeo: {url}")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
-        try:
-            page = browser.new_page()
-            logging.info("[AllAccess] Navegando a la página...")
-            page.goto(url, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=20000)
-            logging.info("[AllAccess] Página cargada")
-
-            fechas_estado = {}
-
-            try:
-                page.click("div.dropdown", timeout=5000)
-                page.wait_for_timeout(1000)
-                logging.info("[AllAccess] Dropdown abierto")
-            except Exception:
-                logging.info("[AllAccess] Sin dropdown, continuando")
-
-            items = page.query_selector_all("ul#show-dropdown li")
-            logging.info(f"[AllAccess] Fechas encontradas: {len(items)}")
-
-            for item in items:
-                try:
-                    clase = item.get_attribute("class") or ""
-                    texto_el = item.query_selector("div")
-                    texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
-                    fecha_label = texto.split("\n")[0].strip()
-                    if not fecha_label:
-                        continue
-                    if "agotado" in clase.lower():
-                        fechas_estado[fecha_label] = "sold_out"
-                    else:
-                        fechas_estado[fecha_label] = "available"
-                    logging.info(f"[AllAccess] {fecha_label}: {fechas_estado[fecha_label]}")
-                except Exception as ex:
-                    logging.warning(f"[AllAccess] Error leyendo item: {ex}")
-                    continue
-        finally:
-            browser.close()
-            logging.info("[AllAccess] Browser cerrado")
-
-    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
-    if disponibles:
-        return {
-            "status": "available",
-            "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
-            "fechas": fechas_estado
-        }
-    return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
-
-
-def _check_enigmatickets(url: str) -> dict:
-    logging.info(f"[Enigma] Iniciando chequeo: {url}")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
-        try:
-            page = browser.new_page()
-            logging.info("[Enigma] Navegando a la página...")
-            page.goto(url, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=20000)
-            logging.info("[Enigma] Página cargada")
-
-            fechas_estado = {}
-
-            filas = page.query_selector_all("div.flex.h-\\[40px\\].items-center.pl-3.pr-3.justify-between")
-            logging.info(f"[Enigma] Fases encontradas: {len(filas)}")
-
-            for fila in filas:
-                try:
-                    nombre_el = fila.query_selector("span.truncate")
-                    nombre = nombre_el.inner_text().strip() if nombre_el else "Fase desconocida"
-
-                    estado_el = fila.query_selector("span[data-testid='text-component']")
-                    estado_texto = estado_el.inner_text().strip().lower() if estado_el else ""
-
-                    btn_div = fila.query_selector("div.flex.justify-end div")
-                    clases = btn_div.get_attribute("class") if btn_div else ""
-
-                    logging.info(f"[Enigma] [{nombre}]: '{estado_texto}' | clases: {clases}")
-
-                    if "agotado" in estado_texto or "sold out" in estado_texto or "bg-red" in clases:
-                        fechas_estado[nombre] = "sold_out"
-                    elif any(kw in estado_texto for kw in ["comprar", "disponible", "compra", "buy"]):
-                        fechas_estado[nombre] = "available"
-                    else:
-                        fechas_estado[nombre] = "unknown"
-
-                except Exception as ex:
-                    logging.warning(f"[Enigma] Error leyendo fila: {ex}")
-                    continue
-
-            if not fechas_estado:
-                logging.info("[Enigma] Sin filas, usando fallback con spans")
-                todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
-                for span in todos_los_spans:
-                    texto = span.inner_text().strip().lower()
-                    if "agotado" in texto or "sold out" in texto:
-                        fechas_estado["General"] = "sold_out"
-                        break
-                    elif any(kw in texto for kw in ["comprar", "disponible", "buy"]):
-                        fechas_estado["General"] = "available"
-                        break
-        finally:
-            browser.close()
-            logging.info("[Enigma] Browser cerrado")
-
-    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
-    if disponibles:
-        return {
-            "status": "available",
-            "snippet": f"Fases disponibles: {', '.join(disponibles)}",
-            "fechas": fechas_estado
-        }
-    return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
-
-
-def _check_movistar_arena(url: str) -> dict:
+def _login_movistar(page):
     email    = os.environ.get("MOVISTAR_EMAIL", "")
     password = os.environ.get("MOVISTAR_PASSWORD", "")
 
     if not email or not password:
-        logging.error("[Movistar] Credenciales no configuradas en variables de entorno")
-        return {"status": "error", "snippet": "Credenciales no configuradas", "fechas": {}}
+        raise Exception("Credenciales no configuradas")
 
+    logging.info("[Movistar] Paso 1: Navegando al login...")
+    page.goto("https://login.movistararena.com.ar/Account/Login", timeout=30000)
+    logging.info("[Movistar] Página de login cargada")
+
+    logging.info("[Movistar] Paso 2: Completando formulario...")
+    page.fill("#inputEmail", email)
+    page.fill("#inputPassword", password)
+
+    logging.info("[Movistar] Paso 3: Haciendo click en login...")
+    page.click("button.btn-login")
+
+    logging.info("[Movistar] Paso 4: Esperando redirección...")
+    page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
+    logging.info("[Movistar] Login exitoso")
+
+# ─────────────────────────────────────────────
+# Checker estándar Movistar Arena
+# ─────────────────────────────────────────────
+
+def _check_movistar_arena(url: str) -> dict:
     logging.info(f"[Movistar] Iniciando chequeo: {url}")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
         try:
             page = browser.new_page()
+            _login_movistar(page)
 
-            logging.info("[Movistar] Paso 1: Navegando al login...")
-            page.goto("https://login.movistararena.com.ar/Account/Login", timeout=30000)
-            logging.info("[Movistar] Página de login cargada")
-
-            logging.info("[Movistar] Paso 2: Completando formulario de login...")
-            page.fill("#inputEmail", email)
-            page.fill("#inputPassword", password)
-
-            logging.info("[Movistar] Paso 3: Haciendo click en login...")
-            page.click("button.btn-login")
-
-            logging.info("[Movistar] Paso 4: Esperando redirección post-login...")
-            page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
-            logging.info("[Movistar] Login exitoso")
-
-            logging.info(f"[Movistar] Paso 5: Navegando al evento...")
+            logging.info("[Movistar] Paso 5: Navegando al evento...")
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
             logging.info("[Movistar] Página del evento cargada")
@@ -415,8 +301,259 @@ def _check_movistar_arena(url: str) -> dict:
         }
     return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
 
+
 # ─────────────────────────────────────────────
-# Checkers públicos (usan multiprocessing)
+# Checker profundo Movistar Arena (Rosalía)
+# Entra al mapa y verifica sectores reales
+# ─────────────────────────────────────────────
+
+def _check_movistar_profundo(url: str) -> dict:
+    logging.info(f"[Movistar-Profundo] Iniciando chequeo profundo: {url}")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
+        try:
+            page = browser.new_page()
+            _login_movistar(page)
+
+            logging.info("[Movistar-Profundo] Paso 5: Navegando al evento...")
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+            logging.info("[Movistar-Profundo] Página del evento cargada")
+
+            fechas_estado = {}
+
+            # Buscar fechas del calendario
+            try:
+                page.wait_for_selector("button.dia-evento", timeout=8000)
+                fecha_buttons = page.query_selector_all("button.dia-evento")
+                logging.info(f"[Movistar-Profundo] {len(fecha_buttons)} fechas encontradas")
+
+                mes_header = page.query_selector(".mud-picker-calendar-header-transition")
+                mes_texto  = mes_header.inner_text().strip() if mes_header else ""
+
+                for i, btn in enumerate(fecha_buttons):
+                    try:
+                        logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{len(fecha_buttons)}...")
+                        btn.click()
+                        page.wait_for_timeout(1500)
+
+                        dia_el = btn.query_selector("p")
+                        dia    = dia_el.inner_text().strip() if dia_el else "?"
+                        fecha_label = f"{dia} de {mes_texto}"
+
+                        # Buscar botón de Entrada General solamente
+                        filas_ticket = page.query_selector_all("div.fecha-row, div.evento-row, div[class*='row']")
+                        btn_entrada_general = None
+
+                        # Buscar el botón "Seleccionar" de Entrada General
+                        todos_los_botones = page.query_selector_all("span.mud-button-label")
+                        for j, tb in enumerate(todos_los_botones):
+                            texto = tb.inner_text().strip().lower()
+                            if "seleccionar" in texto or "comprar" in texto:
+                                # Verificar que el contexto sea Entrada General
+                                parent = tb.evaluate_handle("el => el.closest('div.fecha-row') || el.closest('div[class*=\"row\"]') || el.parentElement?.parentElement?.parentElement")
+                                try:
+                                    parent_text = parent.evaluate("el => el ? el.innerText : ''").lower()
+                                    if "diamond" in parent_text or "vip" in parent_text or "gold" in parent_text:
+                                        logging.info(f"[Movistar-Profundo] Ignorando botón VIP")
+                                        continue
+                                except Exception:
+                                    pass
+                                btn_entrada_general = tb
+                                break
+
+                        if not btn_entrada_general:
+                            # Si no encontró Entrada General, buscar el primer "Seleccionar" disponible que no sea VIP
+                            logging.info(f"[Movistar-Profundo] Buscando botón Seleccionar genérico...")
+                            for tb in todos_los_botones:
+                                texto = tb.inner_text().strip().lower()
+                                if "seleccionar" in texto:
+                                    btn_entrada_general = tb
+                                    break
+
+                        if not btn_entrada_general:
+                            logging.info(f"[Movistar-Profundo] {fecha_label}: sin botón Seleccionar, sold_out")
+                            fechas_estado[fecha_label] = "sold_out"
+                            continue
+
+                        # Hacer click en Seleccionar y entrar al mapa
+                        logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
+                        btn_entrada_general.click()
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                        page.wait_for_timeout(2000)
+
+                        # Buscar sectores disponibles en el mapa (esSector sin disabled)
+                        sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
+                        logging.info(f"[Movistar-Profundo] {fecha_label}: {len(sectores_disponibles)} sectores disponibles en mapa")
+
+                        if sectores_disponibles:
+                            fechas_estado[fecha_label] = "available"
+                            logging.info(f"[Movistar-Profundo] ✅ {fecha_label}: HAY ENTRADAS REALES")
+                        else:
+                            fechas_estado[fecha_label] = "sold_out"
+                            logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris, sin entradas")
+
+                        # Volver a la página del evento para la siguiente fecha
+                        page.go_back()
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                        page.wait_for_timeout(1500)
+
+                    except Exception as ex:
+                        logging.warning(f"[Movistar-Profundo] Error en fecha {i+1}: {ex}")
+                        # Intentar volver si algo falló
+                        try:
+                            page.go_back()
+                            page.wait_for_timeout(1500)
+                        except Exception:
+                            pass
+                        continue
+
+            except Exception as ex:
+                logging.warning(f"[Movistar-Profundo] Error buscando calendario: {ex}")
+
+        finally:
+            browser.close()
+            logging.info("[Movistar-Profundo] Browser cerrado")
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Fechas con entradas reales: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "sin entradas reales en el mapa", "fechas": fechas_estado}
+
+
+# ─────────────────────────────────────────────
+# Checker AllAccess
+# ─────────────────────────────────────────────
+
+def _check_allaccess(url: str) -> dict:
+    logging.info(f"[AllAccess] Iniciando chequeo: {url}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
+        try:
+            page = browser.new_page()
+            logging.info("[AllAccess] Navegando a la página...")
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+            logging.info("[AllAccess] Página cargada")
+
+            fechas_estado = {}
+
+            try:
+                page.click("div.dropdown", timeout=5000)
+                page.wait_for_timeout(1000)
+                logging.info("[AllAccess] Dropdown abierto")
+            except Exception:
+                logging.info("[AllAccess] Sin dropdown, continuando")
+
+            items = page.query_selector_all("ul#show-dropdown li")
+            logging.info(f"[AllAccess] Fechas encontradas: {len(items)}")
+
+            for item in items:
+                try:
+                    clase = item.get_attribute("class") or ""
+                    texto_el = item.query_selector("div")
+                    texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
+                    fecha_label = texto.split("\n")[0].strip()
+                    if not fecha_label:
+                        continue
+                    if "agotado" in clase.lower():
+                        fechas_estado[fecha_label] = "sold_out"
+                    else:
+                        fechas_estado[fecha_label] = "available"
+                    logging.info(f"[AllAccess] {fecha_label}: {fechas_estado[fecha_label]}")
+                except Exception as ex:
+                    logging.warning(f"[AllAccess] Error leyendo item: {ex}")
+                    continue
+        finally:
+            browser.close()
+            logging.info("[AllAccess] Browser cerrado")
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Fechas disponibles: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
+
+# ─────────────────────────────────────────────
+# Checker Enigma Tickets
+# ─────────────────────────────────────────────
+
+def _check_enigmatickets(url: str) -> dict:
+    logging.info(f"[Enigma] Iniciando chequeo: {url}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
+        try:
+            page = browser.new_page()
+            logging.info("[Enigma] Navegando a la página...")
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+            logging.info("[Enigma] Página cargada")
+
+            fechas_estado = {}
+
+            filas = page.query_selector_all("div.flex.h-\\[40px\\].items-center.pl-3.pr-3.justify-between")
+            logging.info(f"[Enigma] Fases encontradas: {len(filas)}")
+
+            for fila in filas:
+                try:
+                    nombre_el = fila.query_selector("span.truncate")
+                    nombre = nombre_el.inner_text().strip() if nombre_el else "Fase desconocida"
+
+                    estado_el = fila.query_selector("span[data-testid='text-component']")
+                    estado_texto = estado_el.inner_text().strip().lower() if estado_el else ""
+
+                    btn_div = fila.query_selector("div.flex.justify-end div")
+                    clases = btn_div.get_attribute("class") if btn_div else ""
+
+                    logging.info(f"[Enigma] [{nombre}]: '{estado_texto}' | clases: {clases}")
+
+                    if "agotado" in estado_texto or "sold out" in estado_texto or "bg-red" in clases:
+                        fechas_estado[nombre] = "sold_out"
+                    elif any(kw in estado_texto for kw in ["comprar", "disponible", "compra", "buy"]):
+                        fechas_estado[nombre] = "available"
+                    else:
+                        fechas_estado[nombre] = "unknown"
+
+                except Exception as ex:
+                    logging.warning(f"[Enigma] Error leyendo fila: {ex}")
+                    continue
+
+            if not fechas_estado:
+                logging.info("[Enigma] Sin filas, usando fallback con spans")
+                todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
+                for span in todos_los_spans:
+                    texto = span.inner_text().strip().lower()
+                    if "agotado" in texto or "sold out" in texto:
+                        fechas_estado["General"] = "sold_out"
+                        break
+                    elif any(kw in texto for kw in ["comprar", "disponible", "buy"]):
+                        fechas_estado["General"] = "available"
+                        break
+        finally:
+            browser.close()
+            logging.info("[Enigma] Browser cerrado")
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Fases disponibles: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
+
+# ─────────────────────────────────────────────
+# Checkers públicos
 # ─────────────────────────────────────────────
 
 def check_allaccess(url: str) -> dict:
@@ -428,8 +565,14 @@ def check_enigmatickets(url: str) -> dict:
 def check_movistar_arena(url: str) -> dict:
     return run_with_timeout("movistar", url)
 
+def check_movistar_profundo(url: str) -> dict:
+    return run_with_timeout("movistar_profundo", url)
+
 def check_url(url: str) -> dict:
     if "movistararena.com.ar" in url:
+        # Rosalía usa checker profundo
+        if url == ROSALIA_URL:
+            return check_movistar_profundo(url)
         return check_movistar_arena(url)
     if "allaccess.com.ar" in url:
         return check_allaccess(url)
@@ -528,7 +671,7 @@ def handle_command(text: str, urls: dict) -> str:
             "/check — Forzar chequeo ahora mismo\n"
             "/help — Ver esta ayuda\n\n"
             "AllAccess y Enigma: cada 5 minutos\n"
-            "Movistar Arena: cada 20 minutos"
+            "Movistar Arena: cada 10 minutos"
         )
 
     return f"❓ Comando no reconocido: {cmd}\nEscribí /help para ver los comandos."
