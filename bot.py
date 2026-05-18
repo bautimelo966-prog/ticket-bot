@@ -210,6 +210,14 @@ def _get_mes_texto(page) -> str:
     except Exception:
         return ""
 
+def _volver_al_evento(page, url: str):
+    """Navega directamente a la URL del evento en lugar de usar go_back()."""
+    logging.info("[Movistar-Profundo] Volviendo al evento por navegación directa...")
+    page.goto(url, timeout=30000)
+    page.wait_for_load_state("networkidle", timeout=20000)
+    page.wait_for_timeout(1500)
+    logging.info("[Movistar-Profundo] Evento recargado")
+
 # ─────────────────────────────────────────────
 # Checker estándar Movistar Arena
 # ─────────────────────────────────────────────
@@ -308,6 +316,7 @@ def _check_movistar_arena(url: str) -> dict:
 
 # ─────────────────────────────────────────────
 # Checker profundo Movistar Arena (Rosalía)
+# Usa navegación directa en vez de go_back()
 # ─────────────────────────────────────────────
 
 def _check_movistar_profundo(url: str) -> dict:
@@ -326,9 +335,8 @@ def _check_movistar_profundo(url: str) -> dict:
 
             fechas_estado = {}
 
-            # Obtener cantidad de fechas y sus labels antes de empezar
+            # Obtener días y total de fechas en la primera carga
             try:
-                # FIX: timeout=15000 para dar tiempo suficiente al calendario
                 page.wait_for_selector("button.dia-evento", timeout=15000)
                 fecha_buttons = page.query_selector_all("button.dia-evento")
                 total_fechas  = len(fecha_buttons)
@@ -349,12 +357,13 @@ def _check_movistar_profundo(url: str) -> dict:
                 logging.warning(f"[Movistar-Profundo] Error buscando calendario: {ex}")
                 return {"status": "error", "snippet": str(ex), "fechas": {}}
 
+            # Procesar cada fecha por índice
             for i in range(total_fechas):
                 fecha_label = f"{dias[i]} de {mes_texto}"
                 logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{total_fechas}: {fecha_label}")
 
                 try:
-                    # FIX: timeout=15000 para dar tiempo al DOM después del go_back()
+                    # Re-buscar botones frescos del DOM
                     page.wait_for_selector("button.dia-evento", timeout=15000)
                     fecha_buttons_fresh = page.query_selector_all("button.dia-evento")
 
@@ -390,11 +399,13 @@ def _check_movistar_profundo(url: str) -> dict:
                         fechas_estado[fecha_label] = "sold_out"
                         continue
 
+                    # Entrar al mapa
                     logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
                     btn_seleccionar.click()
                     page.wait_for_load_state("networkidle", timeout=15000)
                     page.wait_for_timeout(2000)
 
+                    # Verificar sectores disponibles
                     sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
                     cant = len(sectores_disponibles)
                     logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
@@ -406,17 +417,14 @@ def _check_movistar_profundo(url: str) -> dict:
                         fechas_estado[fecha_label] = "sold_out"
                         logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris, sin entradas")
 
-                    page.go_back()
-                    page.wait_for_load_state("networkidle", timeout=15000)
-                    page.wait_for_timeout(2000)
+                    # FIX: Navegar directo a la URL en vez de go_back()
+                    _volver_al_evento(page, url)
 
                 except Exception as ex:
                     logging.warning(f"[Movistar-Profundo] Error en fecha {i+1} ({fecha_label}): {ex}")
                     fechas_estado[fecha_label] = "unknown"
                     try:
-                        page.goto(url, timeout=30000)
-                        page.wait_for_load_state("networkidle", timeout=20000)
-                        page.wait_for_timeout(2000)
+                        _volver_al_evento(page, url)
                     except Exception:
                         pass
                     continue
