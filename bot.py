@@ -25,7 +25,7 @@ URLS_FILE        = "urls.json"
 CHECK_INTERVAL_MOVISTAR  = 600    # 10 minutos
 CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
 CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
-PLAYWRIGHT_TIMEOUT       = 120    # segundos máximos (más tiempo para el checker profundo)
+PLAYWRIGHT_TIMEOUT       = 180    # 3 minutos — más tiempo para checker profundo con varias fechas
 
 # URL de Rosalía — checker profundo activado para esta URL
 ROSALIA_URL = "https://www.movistararena.com.ar/Ticketera/38f53ef6-e155-414d-a0ba-65fe089fdf5a"
@@ -180,7 +180,7 @@ def run_with_timeout(fn_name: str, url: str) -> dict:
     }
 
 # ─────────────────────────────────────────────
-# Login compartido (helper interno)
+# Login compartido
 # ─────────────────────────────────────────────
 
 def _login_movistar(page):
@@ -204,6 +204,17 @@ def _login_movistar(page):
     logging.info("[Movistar] Paso 4: Esperando redirección...")
     page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
     logging.info("[Movistar] Login exitoso")
+
+# ─────────────────────────────────────────────
+# Helper: obtener label de fecha desde botón del calendario
+# ─────────────────────────────────────────────
+
+def _get_mes_texto(page) -> str:
+    try:
+        mes_header = page.query_selector(".mud-picker-calendar-header-transition")
+        return mes_header.inner_text().strip() if mes_header else ""
+    except Exception:
+        return ""
 
 # ─────────────────────────────────────────────
 # Checker estándar Movistar Arena
@@ -231,8 +242,7 @@ def _check_movistar_arena(url: str) -> dict:
                 fecha_buttons = page.query_selector_all("button.dia-evento")
                 logging.info(f"[Movistar] Formato calendario — {len(fecha_buttons)} fechas encontradas")
 
-                mes_header = page.query_selector(".mud-picker-calendar-header-transition")
-                mes_texto  = mes_header.inner_text().strip() if mes_header else ""
+                mes_texto = _get_mes_texto(page)
                 logging.info(f"[Movistar] Mes detectado: '{mes_texto}'")
 
                 for i, btn in enumerate(fecha_buttons):
@@ -304,7 +314,7 @@ def _check_movistar_arena(url: str) -> dict:
 
 # ─────────────────────────────────────────────
 # Checker profundo Movistar Arena (Rosalía)
-# Entra al mapa y verifica sectores reales
+# Re-busca botones del DOM después de cada go_back()
 # ─────────────────────────────────────────────
 
 def _check_movistar_profundo(url: str) -> dict:
@@ -323,94 +333,109 @@ def _check_movistar_profundo(url: str) -> dict:
 
             fechas_estado = {}
 
-            # Buscar fechas del calendario
+            # Obtener cantidad de fechas y sus labels antes de empezar
             try:
                 page.wait_for_selector("button.dia-evento", timeout=8000)
                 fecha_buttons = page.query_selector_all("button.dia-evento")
-                logging.info(f"[Movistar-Profundo] {len(fecha_buttons)} fechas encontradas")
+                total_fechas  = len(fecha_buttons)
+                logging.info(f"[Movistar-Profundo] {total_fechas} fechas encontradas")
 
-                mes_header = page.query_selector(".mud-picker-calendar-header-transition")
-                mes_texto  = mes_header.inner_text().strip() if mes_header else ""
+                mes_texto = _get_mes_texto(page)
 
-                for i, btn in enumerate(fecha_buttons):
+                # Obtener los días de cada botón antes de empezar el loop
+                dias = []
+                for btn in fecha_buttons:
                     try:
-                        logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{len(fecha_buttons)}...")
-                        btn.click()
-                        page.wait_for_timeout(1500)
-
                         dia_el = btn.query_selector("p")
                         dia    = dia_el.inner_text().strip() if dia_el else "?"
-                        fecha_label = f"{dia} de {mes_texto}"
-
-                        # Buscar botón de Entrada General solamente
-                        filas_ticket = page.query_selector_all("div.fecha-row, div.evento-row, div[class*='row']")
-                        btn_entrada_general = None
-
-                        # Buscar el botón "Seleccionar" de Entrada General
-                        todos_los_botones = page.query_selector_all("span.mud-button-label")
-                        for j, tb in enumerate(todos_los_botones):
-                            texto = tb.inner_text().strip().lower()
-                            if "seleccionar" in texto or "comprar" in texto:
-                                # Verificar que el contexto sea Entrada General
-                                parent = tb.evaluate_handle("el => el.closest('div.fecha-row') || el.closest('div[class*=\"row\"]') || el.parentElement?.parentElement?.parentElement")
-                                try:
-                                    parent_text = parent.evaluate("el => el ? el.innerText : ''").lower()
-                                    if "diamond" in parent_text or "vip" in parent_text or "gold" in parent_text:
-                                        logging.info(f"[Movistar-Profundo] Ignorando botón VIP")
-                                        continue
-                                except Exception:
-                                    pass
-                                btn_entrada_general = tb
-                                break
-
-                        if not btn_entrada_general:
-                            # Si no encontró Entrada General, buscar el primer "Seleccionar" disponible que no sea VIP
-                            logging.info(f"[Movistar-Profundo] Buscando botón Seleccionar genérico...")
-                            for tb in todos_los_botones:
-                                texto = tb.inner_text().strip().lower()
-                                if "seleccionar" in texto:
-                                    btn_entrada_general = tb
-                                    break
-
-                        if not btn_entrada_general:
-                            logging.info(f"[Movistar-Profundo] {fecha_label}: sin botón Seleccionar, sold_out")
-                            fechas_estado[fecha_label] = "sold_out"
-                            continue
-
-                        # Hacer click en Seleccionar y entrar al mapa
-                        logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
-                        btn_entrada_general.click()
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                        page.wait_for_timeout(2000)
-
-                        # Buscar sectores disponibles en el mapa (esSector sin disabled)
-                        sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
-                        logging.info(f"[Movistar-Profundo] {fecha_label}: {len(sectores_disponibles)} sectores disponibles en mapa")
-
-                        if sectores_disponibles:
-                            fechas_estado[fecha_label] = "available"
-                            logging.info(f"[Movistar-Profundo] ✅ {fecha_label}: HAY ENTRADAS REALES")
-                        else:
-                            fechas_estado[fecha_label] = "sold_out"
-                            logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris, sin entradas")
-
-                        # Volver a la página del evento para la siguiente fecha
-                        page.go_back()
-                        page.wait_for_load_state("networkidle", timeout=15000)
-                        page.wait_for_timeout(1500)
-
-                    except Exception as ex:
-                        logging.warning(f"[Movistar-Profundo] Error en fecha {i+1}: {ex}")
-                        # Intentar volver si algo falló
-                        try:
-                            page.go_back()
-                            page.wait_for_timeout(1500)
-                        except Exception:
-                            pass
-                        continue
+                        dias.append(dia)
+                    except Exception:
+                        dias.append("?")
 
             except Exception as ex:
                 logging.warning(f"[Movistar-Profundo] Error buscando calendario: {ex}")
+                return {"status": "error", "snippet": str(ex), "fechas": {}}
+
+            # Procesar cada fecha por índice — re-busca botones después de cada vuelta
+            for i in range(total_fechas):
+                fecha_label = f"{dias[i]} de {mes_texto}"
+                logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{total_fechas}: {fecha_label}")
+
+                try:
+                    # Re-buscar botones del calendario (DOM fresco después de go_back)
+                    page.wait_for_selector("button.dia-evento", timeout=8000)
+                    fecha_buttons_fresh = page.query_selector_all("button.dia-evento")
+
+                    if i >= len(fecha_buttons_fresh):
+                        logging.warning(f"[Movistar-Profundo] Índice {i} fuera de rango, saltando")
+                        continue
+
+                    # Click en la fecha
+                    fecha_buttons_fresh[i].click()
+                    page.wait_for_timeout(1500)
+
+                    # Buscar botón Seleccionar de Entrada General (ignorar VIP)
+                    btn_seleccionar = None
+                    todos_los_botones = page.query_selector_all("span.mud-button-label")
+
+                    for tb in todos_los_botones:
+                        texto = tb.inner_text().strip().lower()
+                        if "seleccionar" not in texto and "comprar" not in texto:
+                            continue
+
+                        # Verificar que no sea VIP
+                        try:
+                            parent_text = tb.evaluate(
+                                "el => { let p = el.closest('div'); return p ? p.innerText : ''; }"
+                            ).lower()
+                            if "diamond" in parent_text or "gold" in parent_text or "vip" in parent_text:
+                                logging.info("[Movistar-Profundo] Ignorando botón VIP")
+                                continue
+                        except Exception:
+                            pass
+
+                        btn_seleccionar = tb
+                        break
+
+                    if not btn_seleccionar:
+                        logging.info(f"[Movistar-Profundo] {fecha_label}: sin botón Seleccionar → sold_out")
+                        fechas_estado[fecha_label] = "sold_out"
+                        continue
+
+                    # Click en Seleccionar y esperar el mapa
+                    logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
+                    btn_seleccionar.click()
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                    page.wait_for_timeout(2000)
+
+                    # Buscar sectores disponibles (esSector sin disabled)
+                    sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
+                    cant = len(sectores_disponibles)
+                    logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
+
+                    if cant > 0:
+                        fechas_estado[fecha_label] = "available"
+                        logging.info(f"[Movistar-Profundo] ✅ {fecha_label}: HAY ENTRADAS REALES")
+                    else:
+                        fechas_estado[fecha_label] = "sold_out"
+                        logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris, sin entradas")
+
+                    # Volver al evento y esperar que el DOM se recargue
+                    page.go_back()
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                    page.wait_for_timeout(2000)
+
+                except Exception as ex:
+                    logging.warning(f"[Movistar-Profundo] Error en fecha {i+1} ({fecha_label}): {ex}")
+                    fechas_estado[fecha_label] = "unknown"
+                    # Intentar volver al evento para continuar
+                    try:
+                        page.goto(url, timeout=30000)
+                        page.wait_for_load_state("networkidle", timeout=20000)
+                        page.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+                    continue
 
         finally:
             browser.close()
@@ -570,7 +595,6 @@ def check_movistar_profundo(url: str) -> dict:
 
 def check_url(url: str) -> dict:
     if "movistararena.com.ar" in url:
-        # Rosalía usa checker profundo
         if url == ROSALIA_URL:
             return check_movistar_profundo(url)
         return check_movistar_arena(url)
