@@ -22,7 +22,7 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 URLS_FILE        = "urls.json"
 
-CHECK_INTERVAL_MOVISTAR  = 1200   # 20 minutos
+CHECK_INTERVAL_MOVISTAR  = 600   # 10 minutos
 CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
 CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
 PLAYWRIGHT_TIMEOUT       = 90     # segundos máximos antes de matar el proceso
