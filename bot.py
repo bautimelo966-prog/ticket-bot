@@ -27,6 +27,14 @@ CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
 CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
 PLAYWRIGHT_TIMEOUT       = 90     # segundos máximos antes de matar el proceso
 
+# Argumentos de Chrome para correr en contenedor Linux sin zygote
+CHROME_ARGS = [
+    "--no-zygote",
+    "--single-process",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+]
+
 KEYWORDS_AVAILABLE = [
     "comprar", "compra", "comprá", "buy", "agregar al carrito",
     "seleccionar", "disponible", "en venta", "obtener entradas",
@@ -115,11 +123,9 @@ def get_interval(url: str) -> int:
 
 def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: dict):
     """Corre en proceso separado. Escribe resultado en result_queue."""
-    # Restaurar variables de entorno en el proceso hijo
     for k, v in env.items():
         os.environ[k] = v
 
-    # Logging en el proceso hijo
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s"
@@ -168,7 +174,6 @@ def run_with_timeout(fn_name: str, url: str) -> dict:
     if not result_queue.empty():
         return result_queue.get_nowait()
 
-    # El proceso terminó pero no dejó resultado (crash silencioso)
     return {
         "status": "error",
         "snippet": "El proceso de chequeo terminó inesperadamente sin resultado.",
@@ -182,7 +187,7 @@ def run_with_timeout(fn_name: str, url: str) -> dict:
 def _check_allaccess(url: str) -> dict:
     logging.info(f"[AllAccess] Iniciando chequeo: {url}")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
         try:
             page = browser.new_page()
             logging.info("[AllAccess] Navegando a la página...")
@@ -235,7 +240,7 @@ def _check_allaccess(url: str) -> dict:
 def _check_enigmatickets(url: str) -> dict:
     logging.info(f"[Enigma] Iniciando chequeo: {url}")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
         try:
             page = browser.new_page()
             logging.info("[Enigma] Navegando a la página...")
@@ -272,7 +277,6 @@ def _check_enigmatickets(url: str) -> dict:
                     logging.warning(f"[Enigma] Error leyendo fila: {ex}")
                     continue
 
-            # Fallback: buscar spans si no encontró filas
             if not fechas_estado:
                 logging.info("[Enigma] Sin filas, usando fallback con spans")
                 todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
@@ -309,11 +313,10 @@ def _check_movistar_arena(url: str) -> dict:
     logging.info(f"[Movistar] Iniciando chequeo: {url}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
         try:
             page = browser.new_page()
 
-            # ── Paso 1: Login ──
             logging.info("[Movistar] Paso 1: Navegando al login...")
             page.goto("https://login.movistararena.com.ar/Account/Login", timeout=30000)
             logging.info("[Movistar] Página de login cargada")
@@ -321,24 +324,23 @@ def _check_movistar_arena(url: str) -> dict:
             logging.info("[Movistar] Paso 2: Completando formulario de login...")
             page.fill("#inputEmail", email)
             page.fill("#inputPassword", password)
+
             logging.info("[Movistar] Paso 3: Haciendo click en login...")
             page.click("button.btn-login")
 
             logging.info("[Movistar] Paso 4: Esperando redirección post-login...")
             page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
-            logging.info("[Movistar] Login exitoso, redirigido correctamente")
+            logging.info("[Movistar] Login exitoso")
 
-            # ── Paso 2: Navegar al evento ──
-            logging.info(f"[Movistar] Paso 5: Navegando al evento: {url}")
+            logging.info(f"[Movistar] Paso 5: Navegando al evento...")
             page.goto(url, timeout=30000)
             page.wait_for_load_state("networkidle", timeout=20000)
             logging.info("[Movistar] Página del evento cargada")
 
             fechas_estado = {}
 
-            # ── Paso 3: Intentar formato calendario ──
             try:
-                logging.info("[Movistar] Paso 6: Buscando botones de calendario (button.dia-evento)...")
+                logging.info("[Movistar] Paso 6: Buscando botones de calendario...")
                 page.wait_for_selector("button.dia-evento", timeout=8000)
                 fecha_buttons = page.query_selector_all("button.dia-evento")
                 logging.info(f"[Movistar] Formato calendario — {len(fecha_buttons)} fechas encontradas")
@@ -373,8 +375,7 @@ def _check_movistar_arena(url: str) -> dict:
                         continue
 
             except Exception:
-                # ── Paso 3b: Fallback formato lista ──
-                logging.info("[Movistar] Calendario no encontrado, intentando formato lista (div.evento-row)...")
+                logging.info("[Movistar] Calendario no encontrado, intentando formato lista...")
                 filas = page.query_selector_all("div.evento-row")
                 logging.info(f"[Movistar] Formato lista — {len(filas)} filas encontradas")
 
@@ -435,7 +436,6 @@ def check_url(url: str) -> dict:
     if "enigmatickets.com" in url:
         return check_enigmatickets(url)
 
-    # Scraping genérico para otros sitios
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
@@ -570,7 +570,6 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
 
         log.info(f"  [{new_status}] {name}")
 
-        # Detectar fechas/fases que pasaron a disponible
         nuevas_disponibles = []
         for fecha, estado in nuevas_fechas.items():
             if estado == "available" and fechas_prev.get(fecha) != "available":
@@ -582,7 +581,6 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             log.warning(f"  Error en {name}: {result['snippet']}")
             errors.append((name, result["snippet"]))
 
-        # Armar resumen para /check
         disponibles_actuales = [f for f, s in nuevas_fechas.items() if s == "available"]
         if disponibles_actuales:
             resumen.append(f"🟢 <b>{name}</b>: {', '.join(disponibles_actuales)}")
@@ -595,7 +593,6 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
 
     save_urls(urls)
 
-    # Alertas de disponibilidad
     for url, name, fechas_nuevas in changed:
         msg = (
             f"🚨 <b>¡ENTRADAS DISPONIBLES!</b>\n\n"
@@ -606,7 +603,6 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
         send_telegram(msg)
         log.info(f"  ✅ Alerta enviada: {name} — {fechas_nuevas}")
 
-    # Alertas de error
     for name, snippet in errors:
         send_telegram(
             f"⚠️ <b>Error chequeando {name}</b>\n\n"
@@ -614,7 +610,6 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             f"El bot seguirá intentando en el próximo chequeo."
         )
 
-    # Respuesta al /check manual
     if notify_no_change:
         msg = "📋 <b>Estado actual:</b>\n\n" + "\n".join(resumen) if resumen else \
               "✅ Chequeo manual completado. Sin novedades por ahora."
@@ -637,7 +632,6 @@ def main():
     offset     = 0
 
     while True:
-        # Procesar comandos de Telegram
         updates = get_telegram_updates(offset)
         for update in updates:
             offset = update["update_id"] + 1
@@ -651,10 +645,8 @@ def main():
                 else:
                     send_telegram(response)
 
-        # Chequeo automático por intervalo
         run_check(urls)
 
-        # Aviso diario de vida a las 9am (hora Argentina)
         hora_actual = datetime.utcnow().hour - 3
         if hora_actual < 0:
             hora_actual += 24
