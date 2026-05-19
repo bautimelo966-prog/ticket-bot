@@ -501,8 +501,7 @@ def _check_allaccess(url: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Checker BTS — entra a cada fecha y verifica
-# si Campo General está disponible
+# Checker BTS
 # ─────────────────────────────────────────────
 
 def _check_bts_fecha(page, fecha_url: str) -> str:
@@ -510,68 +509,56 @@ def _check_bts_fecha(page, fecha_url: str) -> str:
     Chequea una fecha individual de BTS.
     Retorna 'available', 'sold_out' o 'unknown'.
     """
-    fecha_label = fecha_url.split("/event/")[-1]
-    logging.info(f"[BTS] Chequeando fecha: {fecha_label}")
+    fecha_label = fecha_url.split("/event/bts-")[-1]
+    logging.info(f"[BTS] Chequeando: {fecha_label}")
 
     page.goto(fecha_url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(2000)
 
-    # Caso 1: página muestra "Agotado" global (div.event-status.status-soldout)
+    # Caso 1: página muestra "Agotado" global
     sold_out_global = page.query_selector("div.event-status.status-soldout")
     if sold_out_global:
-        logging.info(f"[BTS] {fecha_label}: agotado global (status-soldout)")
+        logging.info(f"[BTS] {fecha_label}: agotado global")
         return "sold_out"
 
-    # Caso 2: buscar tarifas — Campo sin badge AGOTADO = disponible
-    # Las tarifas están en el panel de selección
+    # FIX: Esperar a que cargue el panel de tarifas esperando texto visible
     try:
-        page.wait_for_selector("#pickerContent", timeout=8000)
+        page.wait_for_selector("div.selection-container", timeout=10000)
+        logging.info(f"[BTS] {fecha_label}: panel de tarifas cargado")
     except Exception:
-        logging.info(f"[BTS] {fecha_label}: sin panel de tarifas visible")
+        logging.info(f"[BTS] {fecha_label}: sin panel de tarifas → unknown")
         return "unknown"
 
-    # Buscar todas las opciones de tarifa
-    opciones = page.query_selector_all("#pickerContent .selection-body div[data-view]")
-    if not opciones:
-        # Fallback: buscar directamente en el contenido
-        opciones = page.query_selector_all("#pickerContent div")
+    # Obtener todo el texto del panel
+    try:
+        contenido = page.inner_text("div.selection-container").lower()
+        logging.info(f"[BTS] {fecha_label}: contenido panel: {contenido[:300]}")
+    except Exception:
+        logging.info(f"[BTS] {fecha_label}: no se pudo leer el panel → unknown")
+        return "unknown"
 
-    # Buscar texto "CAMPO" en la página y ver si tiene badge agotado
-    contenido = page.inner_text("#pickerContent").lower()
-    logging.info(f"[BTS] {fecha_label}: contenido tarifas: {contenido[:200]}")
-
+    # Si no aparece "campo" en las tarifas → sold_out
     if "campo" not in contenido:
-        logging.info(f"[BTS] {fecha_label}: Campo no aparece en tarifas → sold_out")
+        logging.info(f"[BTS] {fecha_label}: Campo no aparece → sold_out")
         return "sold_out"
 
-    # Si aparece "campo" y también "agotado" junto a él
-    # Buscamos el badge AGOTADO específico de Campo
-    todos_textos = page.query_selector_all("div.map-picker *")
-    campo_agotado = False
-    campo_encontrado = False
+    # Si aparece "campo" con "agotado" → sold_out
+    # Buscar si el badge AGOTADO está cerca de CAMPO
+    lineas = contenido.split("\n")
+    for idx, linea in enumerate(lineas):
+        if "campo" in linea:
+            # Revisar las líneas cercanas buscando "agotado"
+            contexto = " ".join(lineas[max(0, idx-2):idx+3])
+            if "agotado" in contexto:
+                logging.info(f"[BTS] {fecha_label}: Campo con AGOTADO → sold_out")
+                return "sold_out"
+            else:
+                logging.info(f"[BTS] {fecha_label}: ✅ Campo sin AGOTADO → available")
+                return "available"
 
-    for el in todos_textos:
-        try:
-            texto = el.inner_text().strip().lower()
-            if texto == "campo":
-                campo_encontrado = True
-            if campo_encontrado and "agotado" in texto and len(texto) < 20:
-                campo_agotado = True
-                break
-        except Exception:
-            continue
-
-    if not campo_encontrado:
-        logging.info(f"[BTS] {fecha_label}: Campo no encontrado → sold_out")
-        return "sold_out"
-
-    if campo_agotado:
-        logging.info(f"[BTS] {fecha_label}: Campo encontrado pero AGOTADO")
-        return "sold_out"
-
-    logging.info(f"[BTS] {fecha_label}: ✅ Campo disponible")
-    return "available"
+    logging.info(f"[BTS] {fecha_label}: Campo encontrado pero no determinado → unknown")
+    return "unknown"
 
 
 def _check_bts(url: str) -> dict:
