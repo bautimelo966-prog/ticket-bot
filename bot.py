@@ -28,6 +28,13 @@ CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
 PLAYWRIGHT_TIMEOUT       = 180    # 3 minutos
 
 ROSALIA_URL = "https://www.movistararena.com.ar/Ticketera/38f53ef6-e155-414d-a0ba-65fe089fdf5a"
+BTS_URL     = "https://www.allaccess.com.ar/event/bts"
+
+BTS_FECHAS = [
+    "https://www.allaccess.com.ar/event/bts-21-de-octubre",
+    "https://www.allaccess.com.ar/event/bts-23-de-octubre",
+    "https://www.allaccess.com.ar/event/bts-24-de-octubre",
+]
 
 CHROME_ARGS = [
     "--no-zygote",
@@ -134,6 +141,8 @@ def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: di
     try:
         if fn_name == "allaccess":
             result = _check_allaccess(url)
+        elif fn_name == "bts":
+            result = _check_bts(url)
         elif fn_name == "enigma":
             result = _check_enigmatickets(url)
         elif fn_name == "movistar":
@@ -178,7 +187,7 @@ def run_with_timeout(fn_name: str, url: str) -> dict:
     }
 
 # ─────────────────────────────────────────────
-# Login compartido
+# Login Movistar
 # ─────────────────────────────────────────────
 
 def _login_movistar(page):
@@ -211,7 +220,6 @@ def _get_mes_texto(page) -> str:
         return ""
 
 def _volver_al_evento(page, url: str):
-    """Navega directamente a la URL del evento en lugar de usar go_back()."""
     logging.info("[Movistar-Profundo] Volviendo al evento por navegación directa...")
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
@@ -316,7 +324,6 @@ def _check_movistar_arena(url: str) -> dict:
 
 # ─────────────────────────────────────────────
 # Checker profundo Movistar Arena (Rosalía)
-# Usa navegación directa en vez de go_back()
 # ─────────────────────────────────────────────
 
 def _check_movistar_profundo(url: str) -> dict:
@@ -335,7 +342,6 @@ def _check_movistar_profundo(url: str) -> dict:
 
             fechas_estado = {}
 
-            # Obtener días y total de fechas en la primera carga
             try:
                 page.wait_for_selector("button.dia-evento", timeout=15000)
                 fecha_buttons = page.query_selector_all("button.dia-evento")
@@ -357,13 +363,11 @@ def _check_movistar_profundo(url: str) -> dict:
                 logging.warning(f"[Movistar-Profundo] Error buscando calendario: {ex}")
                 return {"status": "error", "snippet": str(ex), "fechas": {}}
 
-            # Procesar cada fecha por índice
             for i in range(total_fechas):
                 fecha_label = f"{dias[i]} de {mes_texto}"
                 logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{total_fechas}: {fecha_label}")
 
                 try:
-                    # Re-buscar botones frescos del DOM
                     page.wait_for_selector("button.dia-evento", timeout=15000)
                     fecha_buttons_fresh = page.query_selector_all("button.dia-evento")
 
@@ -374,7 +378,6 @@ def _check_movistar_profundo(url: str) -> dict:
                     fecha_buttons_fresh[i].click()
                     page.wait_for_timeout(1500)
 
-                    # Buscar botón Seleccionar de Entrada General (ignorar VIP)
                     btn_seleccionar = None
                     todos_los_botones = page.query_selector_all("span.mud-button-label")
 
@@ -399,13 +402,11 @@ def _check_movistar_profundo(url: str) -> dict:
                         fechas_estado[fecha_label] = "sold_out"
                         continue
 
-                    # Entrar al mapa
                     logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
                     btn_seleccionar.click()
                     page.wait_for_load_state("networkidle", timeout=15000)
                     page.wait_for_timeout(2000)
 
-                    # Verificar sectores disponibles
                     sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
                     cant = len(sectores_disponibles)
                     logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
@@ -417,7 +418,6 @@ def _check_movistar_profundo(url: str) -> dict:
                         fechas_estado[fecha_label] = "sold_out"
                         logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris, sin entradas")
 
-                    # FIX: Navegar directo a la URL en vez de go_back()
                     _volver_al_evento(page, url)
 
                 except Exception as ex:
@@ -444,7 +444,7 @@ def _check_movistar_profundo(url: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Checker AllAccess
+# Checker AllAccess estándar
 # ─────────────────────────────────────────────
 
 def _check_allaccess(url: str) -> dict:
@@ -498,6 +498,113 @@ def _check_allaccess(url: str) -> dict:
             "fechas": fechas_estado
         }
     return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
+
+# ─────────────────────────────────────────────
+# Checker BTS — entra a cada fecha y verifica
+# si Campo General está disponible
+# ─────────────────────────────────────────────
+
+def _check_bts_fecha(page, fecha_url: str) -> str:
+    """
+    Chequea una fecha individual de BTS.
+    Retorna 'available', 'sold_out' o 'unknown'.
+    """
+    fecha_label = fecha_url.split("/event/")[-1]
+    logging.info(f"[BTS] Chequeando fecha: {fecha_label}")
+
+    page.goto(fecha_url, timeout=30000)
+    page.wait_for_load_state("networkidle", timeout=20000)
+    page.wait_for_timeout(1500)
+
+    # Caso 1: página muestra "Agotado" global (div.event-status.status-soldout)
+    sold_out_global = page.query_selector("div.event-status.status-soldout")
+    if sold_out_global:
+        logging.info(f"[BTS] {fecha_label}: agotado global (status-soldout)")
+        return "sold_out"
+
+    # Caso 2: buscar tarifas — Campo sin badge AGOTADO = disponible
+    # Las tarifas están en el panel de selección
+    try:
+        page.wait_for_selector("#pickerContent", timeout=8000)
+    except Exception:
+        logging.info(f"[BTS] {fecha_label}: sin panel de tarifas visible")
+        return "unknown"
+
+    # Buscar todas las opciones de tarifa
+    opciones = page.query_selector_all("#pickerContent .selection-body div[data-view]")
+    if not opciones:
+        # Fallback: buscar directamente en el contenido
+        opciones = page.query_selector_all("#pickerContent div")
+
+    # Buscar texto "CAMPO" en la página y ver si tiene badge agotado
+    contenido = page.inner_text("#pickerContent").lower()
+    logging.info(f"[BTS] {fecha_label}: contenido tarifas: {contenido[:200]}")
+
+    if "campo" not in contenido:
+        logging.info(f"[BTS] {fecha_label}: Campo no aparece en tarifas → sold_out")
+        return "sold_out"
+
+    # Si aparece "campo" y también "agotado" junto a él
+    # Buscamos el badge AGOTADO específico de Campo
+    todos_textos = page.query_selector_all("div.map-picker *")
+    campo_agotado = False
+    campo_encontrado = False
+
+    for el in todos_textos:
+        try:
+            texto = el.inner_text().strip().lower()
+            if texto == "campo":
+                campo_encontrado = True
+            if campo_encontrado and "agotado" in texto and len(texto) < 20:
+                campo_agotado = True
+                break
+        except Exception:
+            continue
+
+    if not campo_encontrado:
+        logging.info(f"[BTS] {fecha_label}: Campo no encontrado → sold_out")
+        return "sold_out"
+
+    if campo_agotado:
+        logging.info(f"[BTS] {fecha_label}: Campo encontrado pero AGOTADO")
+        return "sold_out"
+
+    logging.info(f"[BTS] {fecha_label}: ✅ Campo disponible")
+    return "available"
+
+
+def _check_bts(url: str) -> dict:
+    logging.info(f"[BTS] Iniciando chequeo de las 3 fechas")
+    fechas_estado = {}
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
+        try:
+            page = browser.new_page()
+
+            for fecha_url in BTS_FECHAS:
+                fecha_label = fecha_url.split("/event/bts-")[-1].replace("-", " ").title()
+                try:
+                    estado = _check_bts_fecha(page, fecha_url)
+                    fechas_estado[fecha_label] = estado
+                    logging.info(f"[BTS] {fecha_label}: {estado}")
+                except Exception as ex:
+                    logging.warning(f"[BTS] Error en {fecha_label}: {ex}")
+                    fechas_estado[fecha_label] = "unknown"
+
+        finally:
+            browser.close()
+            logging.info("[BTS] Browser cerrado")
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Campo disponible en: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "Campo agotado en todas las fechas", "fechas": fechas_estado}
 
 
 # ─────────────────────────────────────────────
@@ -576,6 +683,9 @@ def _check_enigmatickets(url: str) -> dict:
 def check_allaccess(url: str) -> dict:
     return run_with_timeout("allaccess", url)
 
+def check_bts(url: str) -> dict:
+    return run_with_timeout("bts", url)
+
 def check_enigmatickets(url: str) -> dict:
     return run_with_timeout("enigma", url)
 
@@ -590,6 +700,8 @@ def check_url(url: str) -> dict:
         if url == ROSALIA_URL:
             return check_movistar_profundo(url)
         return check_movistar_arena(url)
+    if url == BTS_URL:
+        return check_bts(url)
     if "allaccess.com.ar" in url:
         return check_allaccess(url)
     if "enigmatickets.com" in url:
