@@ -226,6 +226,35 @@ def _volver_al_evento(page, url: str):
     page.wait_for_timeout(1500)
     logging.info("[Movistar-Profundo] Evento recargado")
 
+def _get_fecha_label_fila(fila) -> str:
+    """
+    Intenta obtener el label de fecha de una fila de evento.
+    Soporta dos formatos de Movistar Arena:
+    - Formato viejo: div.fecha p + div.fecha span → "19 de mayo"
+    - Formato nuevo: div.hora p → "Del 01 al 05 de julio 2026"
+    """
+    # Formato nuevo: div.hora p
+    hora_el = fila.query_selector("div.hora p")
+    if hora_el:
+        texto = hora_el.inner_text().strip()
+        if texto:
+            return texto
+
+    # Formato viejo: div.fecha p + div.fecha span
+    dia_el = fila.query_selector("div.fecha p")
+    mes_el = fila.query_selector("div.fecha span")
+    dia = dia_el.inner_text().strip() if dia_el else ""
+    mes = mes_el.inner_text().strip() if mes_el else ""
+    if dia or mes:
+        return f"{dia} de {mes}".strip()
+
+    # Fallback: texto completo de la fila truncado
+    try:
+        texto = fila.inner_text().strip()[:50]
+        return texto if texto else "Fecha desconocida"
+    except Exception:
+        return "Fecha desconocida"
+
 # ─────────────────────────────────────────────
 # Checker estándar Movistar Arena
 # ─────────────────────────────────────────────
@@ -287,11 +316,8 @@ def _check_movistar_arena(url: str) -> dict:
 
                 for i, fila in enumerate(filas):
                     try:
-                        dia_el = fila.query_selector("div.fecha p")
-                        mes_el = fila.query_selector("div.fecha span")
-                        dia    = dia_el.inner_text().strip() if dia_el else "?"
-                        mes    = mes_el.inner_text().strip() if mes_el else "?"
-                        fecha_label = f"{dia} de {mes}"
+                        # FIX: usar helper que soporta ambos formatos de fecha
+                        fecha_label = _get_fecha_label_fila(fila)
 
                         ticket_buttons   = fila.query_selector_all("span.mud-button-label")
                         tiene_disponible = False
@@ -300,6 +326,14 @@ def _check_movistar_arena(url: str) -> dict:
                             if "seleccionar" in texto or "comprar" in texto:
                                 tiene_disponible = True
                                 break
+
+                        # Si no hay mud-button-label, buscar botón agotado/comprar genérico
+                        if not ticket_buttons:
+                            texto_fila = fila.inner_text().lower()
+                            if "agotado" in texto_fila:
+                                tiene_disponible = False
+                            elif any(kw in texto_fila for kw in ["comprar", "seleccionar", "disponible"]):
+                                tiene_disponible = True
 
                         fechas_estado[fecha_label] = "available" if tiene_disponible else "sold_out"
                         logging.info(f"[Movistar] {fecha_label}: {fechas_estado[fecha_label]}")
@@ -505,10 +539,6 @@ def _check_allaccess(url: str) -> dict:
 # ─────────────────────────────────────────────
 
 def _check_bts_fecha(page, fecha_url: str) -> str:
-    """
-    Chequea una fecha individual de BTS.
-    Retorna 'available', 'sold_out' o 'unknown'.
-    """
     fecha_label = fecha_url.split("/event/bts-")[-1]
     logging.info(f"[BTS] Chequeando: {fecha_label}")
 
@@ -516,13 +546,11 @@ def _check_bts_fecha(page, fecha_url: str) -> str:
     page.wait_for_load_state("networkidle", timeout=20000)
     page.wait_for_timeout(2000)
 
-    # Caso 1: página muestra "Agotado" global
     sold_out_global = page.query_selector("div.event-status.status-soldout")
     if sold_out_global:
         logging.info(f"[BTS] {fecha_label}: agotado global")
         return "sold_out"
 
-    # FIX: Esperar a que cargue el panel de tarifas esperando texto visible
     try:
         page.wait_for_selector("div.selection-container", timeout=10000)
         logging.info(f"[BTS] {fecha_label}: panel de tarifas cargado")
@@ -530,7 +558,6 @@ def _check_bts_fecha(page, fecha_url: str) -> str:
         logging.info(f"[BTS] {fecha_label}: sin panel de tarifas → unknown")
         return "unknown"
 
-    # Obtener todo el texto del panel
     try:
         contenido = page.inner_text("div.selection-container").lower()
         logging.info(f"[BTS] {fecha_label}: contenido panel: {contenido[:300]}")
@@ -538,17 +565,13 @@ def _check_bts_fecha(page, fecha_url: str) -> str:
         logging.info(f"[BTS] {fecha_label}: no se pudo leer el panel → unknown")
         return "unknown"
 
-    # Si no aparece "campo" en las tarifas → sold_out
     if "campo" not in contenido:
         logging.info(f"[BTS] {fecha_label}: Campo no aparece → sold_out")
         return "sold_out"
 
-    # Si aparece "campo" con "agotado" → sold_out
-    # Buscar si el badge AGOTADO está cerca de CAMPO
     lineas = contenido.split("\n")
     for idx, linea in enumerate(lineas):
         if "campo" in linea:
-            # Revisar las líneas cercanas buscando "agotado"
             contexto = " ".join(lineas[max(0, idx-2):idx+3])
             if "agotado" in contexto:
                 logging.info(f"[BTS] {fecha_label}: Campo con AGOTADO → sold_out")
