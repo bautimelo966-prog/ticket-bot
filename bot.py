@@ -27,10 +27,8 @@ CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
 CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
 PLAYWRIGHT_TIMEOUT       = 180    # 3 minutos
 
-# URL actualizada de Rosalía
 ROSALIA_URL = "https://www.movistararena.com.ar/Ticketera/228c6dcf-e0b5-4263-903c-979cc37f34ca"
-
-BTS_URL = "https://www.allaccess.com.ar/event/bts"
+BTS_URL     = "https://www.allaccess.com.ar/event/bts"
 
 BTS_FECHAS = [
     "https://www.allaccess.com.ar/event/bts-21-de-octubre",
@@ -38,7 +36,6 @@ BTS_FECHAS = [
     "https://www.allaccess.com.ar/event/bts-24-de-octubre",
 ]
 
-# Palabras clave para ignorar categorías VIP en Movistar
 VIP_KEYWORDS = ["diamond", "gold", "silver", "vip", "platinum", "black"]
 
 CHROME_ARGS = [
@@ -223,13 +220,14 @@ def _get_mes_texto(page) -> str:
         return ""
 
 def _get_fecha_label_fila(fila) -> str:
-    """Soporta formato nuevo (div.hora p) y viejo (div.fecha p + span)."""
-    hora_el = fila.query_selector("div.hora p")
-    if hora_el:
-        texto = hora_el.inner_text().strip()
-        if texto:
-            return texto
-
+    """
+    Obtiene el label de fecha de una fila de evento.
+    Orden de búsqueda:
+    1. div.fecha p + div.fecha span → "25 de Junio" (Babasonicos, formato viejo)
+    2. div.hora p → "Del 01 al 09 de julio 2026" (Arjona, formato nuevo)
+    3. Fallback: texto completo truncado
+    """
+    # Formato viejo: div.fecha p + div.fecha span
     dia_el = fila.query_selector("div.fecha p")
     mes_el = fila.query_selector("div.fecha span")
     dia = dia_el.inner_text().strip() if dia_el else ""
@@ -237,6 +235,14 @@ def _get_fecha_label_fila(fila) -> str:
     if dia or mes:
         return f"{dia} de {mes}".strip()
 
+    # Formato nuevo: div.hora p
+    hora_el = fila.query_selector("div.hora p")
+    if hora_el:
+        texto = hora_el.inner_text().strip()
+        if texto:
+            return texto
+
+    # Fallback
     try:
         texto = fila.inner_text().strip()[:50]
         return texto if texto else "Fecha desconocida"
@@ -255,7 +261,6 @@ def _es_boton_vip(tb) -> bool:
 
 # ─────────────────────────────────────────────
 # Checker estándar Movistar Arena
-# FIX: ignora botones VIP en ambos formatos
 # ─────────────────────────────────────────────
 
 def _check_movistar_arena(url: str) -> dict:
@@ -293,7 +298,6 @@ def _check_movistar_arena(url: str) -> dict:
                         dia    = dia_el.inner_text().strip() if dia_el else "?"
                         fecha_label = f"{dia} de {mes_texto}"
 
-                        # FIX: ignorar VIP, solo contar Entrada General
                         ticket_buttons   = page.query_selector_all("span.mud-button-label")
                         tiene_disponible = False
                         for tb in ticket_buttons:
