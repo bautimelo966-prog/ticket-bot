@@ -27,7 +27,9 @@ CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
 CHECK_INTERVAL_DEFAULT   = 1200   # 20 minutos
 PLAYWRIGHT_TIMEOUT       = 180    # 3 minutos
 
+# URL de Rosalía — usa checker profundo (verifica mapa real)
 ROSALIA_URL = "https://www.movistararena.com.ar/Ticketera/228c6dcf-e0b5-4263-903c-979cc37f34ca"
+
 BTS_URL     = "https://www.allaccess.com.ar/event/bts"
 
 BTS_FECHAS = [
@@ -149,6 +151,8 @@ def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: di
             result = _check_enigmatickets(url)
         elif fn_name == "movistar":
             result = _check_movistar_arena(url)
+        elif fn_name == "movistar_profundo":
+            result = _check_movistar_profundo(url)
         else:
             result = {"status": "error", "snippet": f"Checker desconocido: {fn_name}", "fechas": {}}
         result_queue.put(result)
@@ -227,7 +231,6 @@ def _get_fecha_label_fila(fila) -> str:
     2. div.hora p → "Del 01 al 09 de julio 2026" (Arjona, formato nuevo)
     3. Fallback: texto completo truncado
     """
-    # Formato viejo: div.fecha p + div.fecha span
     dia_el = fila.query_selector("div.fecha p")
     mes_el = fila.query_selector("div.fecha span")
     dia = dia_el.inner_text().strip() if dia_el else ""
@@ -235,14 +238,12 @@ def _get_fecha_label_fila(fila) -> str:
     if dia or mes:
         return f"{dia} de {mes}".strip()
 
-    # Formato nuevo: div.hora p
     hora_el = fila.query_selector("div.hora p")
     if hora_el:
         texto = hora_el.inner_text().strip()
         if texto:
             return texto
 
-    # Fallback
     try:
         texto = fila.inner_text().strip()[:50]
         return texto if texto else "Fecha desconocida"
@@ -258,6 +259,14 @@ def _es_boton_vip(tb) -> bool:
         return any(kw in parent_text for kw in VIP_KEYWORDS)
     except Exception:
         return False
+
+def _volver_al_evento(page, url: str):
+    """Navega directamente a la URL del evento (no usa go_back)."""
+    logging.info("[Movistar-Profundo] Volviendo al evento por navegación directa...")
+    page.goto(url, timeout=30000)
+    page.wait_for_load_state("networkidle", timeout=20000)
+    page.wait_for_timeout(1500)
+    logging.info("[Movistar-Profundo] Evento recargado")
 
 # ─────────────────────────────────────────────
 # Checker estándar Movistar Arena
@@ -364,6 +373,130 @@ def _check_movistar_arena(url: str) -> dict:
             "fechas": fechas_estado
         }
     return {"status": "sold_out", "snippet": "agotado", "fechas": fechas_estado}
+
+
+# ─────────────────────────────────────────────
+# Checker profundo Movistar Arena (Rosalía)
+# Entra al mapa de cada fecha y verifica si hay
+# sectores g.esSector sin clase "disabled".
+# Si el mapa está todo gris, marca sold_out
+# aunque el botón diga "Seleccionar".
+# ─────────────────────────────────────────────
+
+def _check_movistar_profundo(url: str) -> dict:
+    logging.info(f"[Movistar-Profundo] Iniciando chequeo profundo: {url}")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
+        try:
+            page = browser.new_page()
+            _login_movistar(page)
+
+            logging.info("[Movistar-Profundo] Paso 5: Navegando al evento...")
+            page.goto(url, timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=20000)
+            logging.info("[Movistar-Profundo] Página del evento cargada")
+
+            fechas_estado = {}
+
+            try:
+                page.wait_for_selector("button.dia-evento", timeout=15000)
+                fecha_buttons = page.query_selector_all("button.dia-evento")
+                total_fechas  = len(fecha_buttons)
+                logging.info(f"[Movistar-Profundo] {total_fechas} fechas encontradas")
+
+                mes_texto = _get_mes_texto(page)
+
+                dias = []
+                for btn in fecha_buttons:
+                    try:
+                        dia_el = btn.query_selector("p")
+                        dia    = dia_el.inner_text().strip() if dia_el else "?"
+                        dias.append(dia)
+                    except Exception:
+                        dias.append("?")
+
+            except Exception as ex:
+                logging.warning(f"[Movistar-Profundo] Error buscando calendario: {ex}")
+                return {"status": "error", "snippet": str(ex), "fechas": {}}
+
+            for i in range(total_fechas):
+                fecha_label = f"{dias[i]} de {mes_texto}"
+                logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{total_fechas}: {fecha_label}")
+
+                try:
+                    # Re-buscar botones frescos del DOM (después de navegación directa)
+                    page.wait_for_selector("button.dia-evento", timeout=15000)
+                    fecha_buttons_fresh = page.query_selector_all("button.dia-evento")
+
+                    if i >= len(fecha_buttons_fresh):
+                        logging.warning(f"[Movistar-Profundo] Índice {i} fuera de rango, saltando")
+                        continue
+
+                    fecha_buttons_fresh[i].click()
+                    page.wait_for_timeout(1500)
+
+                    # Buscar botón Seleccionar/Comprar de Entrada General (ignorar VIP)
+                    btn_seleccionar = None
+                    todos_los_botones = page.query_selector_all("span.mud-button-label")
+
+                    for tb in todos_los_botones:
+                        texto = tb.inner_text().strip().lower()
+                        if "seleccionar" not in texto and "comprar" not in texto:
+                            continue
+                        if _es_boton_vip(tb):
+                            logging.info(f"[Movistar-Profundo] Ignorando botón VIP en {fecha_label}")
+                            continue
+                        btn_seleccionar = tb
+                        break
+
+                    if not btn_seleccionar:
+                        logging.info(f"[Movistar-Profundo] {fecha_label}: sin botón Seleccionar → sold_out")
+                        fechas_estado[fecha_label] = "sold_out"
+                        continue
+
+                    # Click en Seleccionar y esperar el mapa
+                    logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
+                    btn_seleccionar.click()
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                    page.wait_for_timeout(2000)
+
+                    # Verificar sectores reales en el mapa
+                    sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
+                    cant = len(sectores_disponibles)
+                    logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
+
+                    if cant > 0:
+                        fechas_estado[fecha_label] = "available"
+                        logging.info(f"[Movistar-Profundo] ✅ {fecha_label}: HAY ENTRADAS REALES")
+                    else:
+                        fechas_estado[fecha_label] = "sold_out"
+                        logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris (falso 'Seleccionar') → sold_out")
+
+                    # Volver al evento por navegación directa
+                    _volver_al_evento(page, url)
+
+                except Exception as ex:
+                    logging.warning(f"[Movistar-Profundo] Error en fecha {i+1} ({fecha_label}): {ex}")
+                    fechas_estado[fecha_label] = "unknown"
+                    try:
+                        _volver_al_evento(page, url)
+                    except Exception:
+                        pass
+                    continue
+
+        finally:
+            browser.close()
+            logging.info("[Movistar-Profundo] Browser cerrado")
+
+    disponibles = [f for f, s in fechas_estado.items() if s == "available"]
+    if disponibles:
+        return {
+            "status": "available",
+            "snippet": f"Fechas con entradas reales: {', '.join(disponibles)}",
+            "fechas": fechas_estado
+        }
+    return {"status": "sold_out", "snippet": "sin entradas reales en el mapa", "fechas": fechas_estado}
 
 
 # ─────────────────────────────────────────────
@@ -591,8 +724,13 @@ def check_enigmatickets(url: str) -> dict:
 def check_movistar_arena(url: str) -> dict:
     return run_with_timeout("movistar", url)
 
+def check_movistar_profundo(url: str) -> dict:
+    return run_with_timeout("movistar_profundo", url)
+
 def check_url(url: str) -> dict:
     if "movistararena.com.ar" in url:
+        if url == ROSALIA_URL:
+            return check_movistar_profundo(url)
         return check_movistar_arena(url)
     if url == BTS_URL:
         return check_bts(url)
