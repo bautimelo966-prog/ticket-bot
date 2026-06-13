@@ -379,8 +379,8 @@ def _check_movistar_arena(url: str) -> dict:
 # Checker profundo Movistar Arena (Rosalía)
 # Entra al mapa de cada fecha y verifica si hay
 # sectores g.esSector sin clase "disabled".
-# Si el mapa está todo gris, marca sold_out
-# aunque el botón diga "Seleccionar".
+# Además guarda la CANTIDAD de sectores para
+# detectar si aumenta (más ubicaciones liberadas).
 # ─────────────────────────────────────────────
 
 def _check_movistar_profundo(url: str) -> dict:
@@ -397,7 +397,8 @@ def _check_movistar_profundo(url: str) -> dict:
             page.wait_for_load_state("networkidle", timeout=20000)
             logging.info("[Movistar-Profundo] Página del evento cargada")
 
-            fechas_estado = {}
+            fechas_estado  = {}
+            sector_counts  = {}
 
             try:
                 page.wait_for_selector("button.dia-evento", timeout=15000)
@@ -453,6 +454,7 @@ def _check_movistar_profundo(url: str) -> dict:
                     if not btn_seleccionar:
                         logging.info(f"[Movistar-Profundo] {fecha_label}: sin botón Seleccionar → sold_out")
                         fechas_estado[fecha_label] = "sold_out"
+                        sector_counts[fecha_label] = 0
                         continue
 
                     # Click en Seleccionar y esperar el mapa
@@ -465,6 +467,8 @@ def _check_movistar_profundo(url: str) -> dict:
                     sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
                     cant = len(sectores_disponibles)
                     logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
+
+                    sector_counts[fecha_label] = cant
 
                     if cant > 0:
                         fechas_estado[fecha_label] = "available"
@@ -494,9 +498,15 @@ def _check_movistar_profundo(url: str) -> dict:
         return {
             "status": "available",
             "snippet": f"Fechas con entradas reales: {', '.join(disponibles)}",
-            "fechas": fechas_estado
+            "fechas": fechas_estado,
+            "sector_counts": sector_counts,
         }
-    return {"status": "sold_out", "snippet": "sin entradas reales en el mapa", "fechas": fechas_estado}
+    return {
+        "status": "sold_out",
+        "snippet": "sin entradas reales en el mapa",
+        "fechas": fechas_estado,
+        "sector_counts": sector_counts,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -878,6 +888,17 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             if estado == "available" and fechas_prev.get(fecha) != "available":
                 nuevas_disponibles.append(fecha)
 
+        # FIX: para checkers que devuelven "sector_counts" (Rosalía profundo),
+        # avisar también si AUMENTÓ la cantidad de sectores disponibles,
+        # aunque la fecha ya estuviera marcada como "available".
+        sector_counts_prev = data.get("sector_counts", {})
+        sector_counts_new  = result.get("sector_counts", {})
+        for fecha, cant in sector_counts_new.items():
+            prev_cant = sector_counts_prev.get(fecha, 0)
+            if cant > prev_cant and fecha not in nuevas_disponibles:
+                nuevas_disponibles.append(fecha)
+                logging.info(f"  📈 {name} — {fecha}: sectores {prev_cant} → {cant}")
+
         if nuevas_disponibles:
             changed.append((url, name, nuevas_disponibles))
         elif new_status == "error":
@@ -890,9 +911,10 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
         else:
             resumen.append(f"🔴 <b>{name}</b>: sin entradas")
 
-        urls[url]["last_status"] = new_status
-        urls[url]["fechas"]      = nuevas_fechas
-        urls[url]["last_check"]  = now
+        urls[url]["last_status"]    = new_status
+        urls[url]["fechas"]         = nuevas_fechas
+        urls[url]["last_check"]     = now
+        urls[url]["sector_counts"]  = sector_counts_new
 
     save_urls(urls)
 
