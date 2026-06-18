@@ -30,6 +30,11 @@ PLAYWRIGHT_TIMEOUT       = 180    # 3 minutos
 # URL de Rosalía — usa checker profundo (verifica mapa real)
 ROSALIA_URL = "https://www.movistararena.com.ar/Ticketera/228c6dcf-e0b5-4263-903c-979cc37f34ca"
 
+# Fechas de Rosalía con falsos positivos — se ignoran completamente
+ROSALIA_FECHAS_IGNORAR = [
+    "6 de agosto de 2026",
+]
+
 BTS_URL     = "https://www.allaccess.com.ar/event/bts"
 
 BTS_FECHAS = [
@@ -224,13 +229,6 @@ def _get_mes_texto(page) -> str:
         return ""
 
 def _get_fecha_label_fila(fila) -> str:
-    """
-    Obtiene el label de fecha de una fila de evento.
-    Orden de búsqueda:
-    1. div.fecha p + div.fecha span → "25 de Junio" (Babasonicos, formato viejo)
-    2. div.hora p → "Del 01 al 09 de julio 2026" (Arjona, formato nuevo)
-    3. Fallback: texto completo truncado
-    """
     dia_el = fila.query_selector("div.fecha p")
     mes_el = fila.query_selector("div.fecha span")
     dia = dia_el.inner_text().strip() if dia_el else ""
@@ -251,7 +249,6 @@ def _get_fecha_label_fila(fila) -> str:
         return "Fecha desconocida"
 
 def _es_boton_vip(tb) -> bool:
-    """Devuelve True si el botón pertenece a una categoría VIP."""
     try:
         parent_text = tb.evaluate(
             "el => { let p = el.closest('div'); return p ? p.innerText : ''; }"
@@ -261,7 +258,6 @@ def _es_boton_vip(tb) -> bool:
         return False
 
 def _volver_al_evento(page, url: str):
-    """Navega directamente a la URL del evento (no usa go_back)."""
     logging.info("[Movistar-Profundo] Volviendo al evento por navegación directa...")
     page.goto(url, timeout=30000)
     page.wait_for_load_state("networkidle", timeout=20000)
@@ -377,10 +373,6 @@ def _check_movistar_arena(url: str) -> dict:
 
 # ─────────────────────────────────────────────
 # Checker profundo Movistar Arena (Rosalía)
-# Entra al mapa de cada fecha y verifica si hay
-# sectores g.esSector sin clase "disabled".
-# Además guarda la CANTIDAD de sectores para
-# detectar si aumenta (más ubicaciones liberadas).
 # ─────────────────────────────────────────────
 
 def _check_movistar_profundo(url: str) -> dict:
@@ -397,8 +389,8 @@ def _check_movistar_profundo(url: str) -> dict:
             page.wait_for_load_state("networkidle", timeout=20000)
             logging.info("[Movistar-Profundo] Página del evento cargada")
 
-            fechas_estado  = {}
-            sector_counts  = {}
+            fechas_estado = {}
+            sector_counts = {}
 
             try:
                 page.wait_for_selector("button.dia-evento", timeout=15000)
@@ -423,10 +415,15 @@ def _check_movistar_profundo(url: str) -> dict:
 
             for i in range(total_fechas):
                 fecha_label = f"{dias[i]} de {mes_texto}"
+
+                # FIX: ignorar fechas con falsos positivos conocidos
+                if fecha_label in ROSALIA_FECHAS_IGNORAR:
+                    logging.info(f"[Movistar-Profundo] {fecha_label}: ignorada (falso positivo conocido)")
+                    continue
+
                 logging.info(f"[Movistar-Profundo] Procesando fecha {i+1}/{total_fechas}: {fecha_label}")
 
                 try:
-                    # Re-buscar botones frescos del DOM (después de navegación directa)
                     page.wait_for_selector("button.dia-evento", timeout=15000)
                     fecha_buttons_fresh = page.query_selector_all("button.dia-evento")
 
@@ -437,7 +434,6 @@ def _check_movistar_profundo(url: str) -> dict:
                     fecha_buttons_fresh[i].click()
                     page.wait_for_timeout(1500)
 
-                    # Buscar botón Seleccionar/Comprar de Entrada General (ignorar VIP)
                     btn_seleccionar = None
                     todos_los_botones = page.query_selector_all("span.mud-button-label")
 
@@ -457,13 +453,11 @@ def _check_movistar_profundo(url: str) -> dict:
                         sector_counts[fecha_label] = 0
                         continue
 
-                    # Click en Seleccionar y esperar el mapa
                     logging.info(f"[Movistar-Profundo] Haciendo click en Seleccionar para {fecha_label}...")
                     btn_seleccionar.click()
                     page.wait_for_load_state("networkidle", timeout=15000)
                     page.wait_for_timeout(2000)
 
-                    # Verificar sectores reales en el mapa
                     sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
                     cant = len(sectores_disponibles)
                     logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
@@ -475,9 +469,8 @@ def _check_movistar_profundo(url: str) -> dict:
                         logging.info(f"[Movistar-Profundo] ✅ {fecha_label}: HAY ENTRADAS REALES")
                     else:
                         fechas_estado[fecha_label] = "sold_out"
-                        logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris (falso 'Seleccionar') → sold_out")
+                        logging.info(f"[Movistar-Profundo] {fecha_label}: mapa todo gris → sold_out")
 
-                    # Volver al evento por navegación directa
                     _volver_al_evento(page, url)
 
                 except Exception as ex:
@@ -888,9 +881,7 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             if estado == "available" and fechas_prev.get(fecha) != "available":
                 nuevas_disponibles.append(fecha)
 
-        # FIX: para checkers que devuelven "sector_counts" (Rosalía profundo),
-        # avisar también si AUMENTÓ la cantidad de sectores disponibles,
-        # aunque la fecha ya estuviera marcada como "available".
+        # Para checkers con sector_counts, avisar si aumenta la cantidad
         sector_counts_prev = data.get("sector_counts", {})
         sector_counts_new  = result.get("sector_counts", {})
         for fecha, cant in sector_counts_new.items():
@@ -911,10 +902,10 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
         else:
             resumen.append(f"🔴 <b>{name}</b>: sin entradas")
 
-        urls[url]["last_status"]    = new_status
-        urls[url]["fechas"]         = nuevas_fechas
-        urls[url]["last_check"]     = now
-        urls[url]["sector_counts"]  = sector_counts_new
+        urls[url]["last_status"]   = new_status
+        urls[url]["fechas"]        = nuevas_fechas
+        urls[url]["last_check"]    = now
+        urls[url]["sector_counts"] = sector_counts_new
 
     save_urls(urls)
 
