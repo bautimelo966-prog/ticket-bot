@@ -339,7 +339,7 @@ def _check_movistar_profundo(url: str) -> dict:
             except Exception:
                 # Fallback: formato lista (evento con una sola fecha o sin calendario)
                 logging.info("[Movistar-Profundo] Sin calendario, intentando formato lista...")
-                filas = page.query_selector_all("div.evento-row")
+                filas = page.query_selector_all("div.shows-listado div.show")
                 logging.info(f"[Movistar-Profundo] Formato lista — {len(filas)} filas encontradas")
 
                 for i, fila in enumerate(filas):
@@ -359,6 +359,15 @@ def _check_movistar_profundo(url: str) -> dict:
                                 continue
                             if _es_boton_vip(tb):
                                 continue
+                            # Verificar que el botón padre no esté deshabilitado
+                            try:
+                                parent_btn = tb.evaluate("el => el.closest('button')")
+                                is_disabled = tb.evaluate("el => el.closest('button')?.disabled || el.closest('button')?.classList.contains('btn-disabled')")
+                                if is_disabled:
+                                    logging.info(f"[Movistar-Profundo] Botón deshabilitado en {fecha_label}, ignorando")
+                                    continue
+                            except Exception:
+                                pass
                             btn_seleccionar = tb
                             break
 
