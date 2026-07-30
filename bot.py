@@ -234,6 +234,33 @@ def _volver_al_evento(page, url: str):
     page.wait_for_timeout(1500)
     logging.info("[Movistar-Profundo] Evento recargado")
 
+
+def _contar_sectores_disponibles(page) -> int:
+    """Cuenta sectores habilitados y reintenta mientras el mapa termina de cargar.
+
+    Movistar puede mostrar el SVG antes de terminar de actualizar las clases
+    ``disabled``. Un conteo de cero se confirma tres veces antes de tratar una
+    fecha como agotada, evitando falsos negativos por una carga tardía.
+    """
+    selector = "g.esSector:not(.disabled)"
+    intentos = 3
+
+    for intento in range(intentos):
+        cant = len(page.query_selector_all(selector))
+        if cant > 0:
+            return cant
+
+        if intento < intentos - 1:
+            logging.info(
+                "[Movistar-Profundo] Mapa sin sectores habilitados; "
+                "esperando actualización (%s/%s)...",
+                intento + 1,
+                intentos - 1,
+            )
+            page.wait_for_timeout(3000)
+
+    return 0
+
 # ─────────────────────────────────────────────
 # Checker profundo Movistar Arena (todas las URLs)
 # ─────────────────────────────────────────────
@@ -312,8 +339,7 @@ def _check_movistar_profundo(url: str) -> dict:
                         page.wait_for_load_state("networkidle", timeout=15000)
                         page.wait_for_timeout(2000)
 
-                        sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
-                        cant = len(sectores_disponibles)
+                        cant = _contar_sectores_disponibles(page)
                         logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores disponibles en mapa")
 
                         sector_counts[fecha_label] = cant
@@ -382,8 +408,7 @@ def _check_movistar_profundo(url: str) -> dict:
                         page.wait_for_load_state("networkidle", timeout=15000)
                         page.wait_for_timeout(2000)
 
-                        sectores_disponibles = page.query_selector_all("g.esSector:not(.disabled)")
-                        cant = len(sectores_disponibles)
+                        cant = _contar_sectores_disponibles(page)
                         logging.info(f"[Movistar-Profundo] {fecha_label}: {cant} sectores en mapa")
 
                         sector_counts[fecha_label] = cant
