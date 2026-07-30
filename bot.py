@@ -37,6 +37,10 @@ BTS_FECHAS = [
 
 VIP_KEYWORDS = ["diamond", "gold", "silver", "vip", "platinum", "black"]
 
+# Color computado de los polígonos disponibles en el mapa actual de Movistar.
+# Se usa sólo como respaldo cuando el mapa no expone la clase ``esSector``.
+MOVISTAR_AVAILABLE_FILL = "rgb(91, 203, 94)"
+
 CHROME_ARGS = [
     "--no-zygote",
     "--single-process",
@@ -249,6 +253,23 @@ def _contar_sectores_disponibles(page) -> int:
         cant = len(page.query_selector_all(selector))
         if cant > 0:
             return cant
+
+        # Algunas fechas usan polígonos SVG sin la clase ``esSector``. En ese
+        # formato, el color computado es la fuente fiable para distinguir los
+        # sectores disponibles de los agotados. Se limita a ``polygon`` para
+        # no contar el punto verde de la leyenda ni otros elementos de la UI.
+        cant_poligonos_verdes = page.locator("svg polygon").evaluate_all(
+            """(poligonos, colorDisponible) => poligonos.filter(
+                poligono => getComputedStyle(poligono).fill === colorDisponible
+            ).length""",
+            MOVISTAR_AVAILABLE_FILL,
+        )
+        if cant_poligonos_verdes > 0:
+            logging.info(
+                "[Movistar-Profundo] Detectados %s polígonos disponibles por color.",
+                cant_poligonos_verdes,
+            )
+            return cant_poligonos_verdes
 
         if intento < intentos - 1:
             logging.info(
