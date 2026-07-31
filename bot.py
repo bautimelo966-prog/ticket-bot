@@ -271,6 +271,29 @@ def _contar_sectores_disponibles(page) -> int:
             )
             return cant_poligonos_verdes
 
+        # Diagnóstico temporal: cuando no hay coincidencias, deja evidencia
+        # del SVG que ve Chromium en Railway. No modifica el resultado ni
+        # genera alertas; sirve para ajustar el selector con datos reales.
+        if intento == 0:
+            try:
+                diagnostico_svg = page.locator("svg polygon").evaluate_all(
+                    """poligonos => {
+                        const colores = {};
+                        for (const poligono of poligonos) {
+                            const color = getComputedStyle(poligono).fill;
+                            colores[color] = (colores[color] || 0) + 1;
+                        }
+                        return { total: poligonos.length, colores };
+                    }"""
+                )
+                logging.info(
+                    "[Movistar-Profundo] Diagnóstico SVG: %s polígonos; colores: %s",
+                    diagnostico_svg["total"],
+                    diagnostico_svg["colores"],
+                )
+            except Exception as ex:
+                logging.warning("[Movistar-Profundo] No se pudo diagnosticar el SVG: %s", ex)
+
         if intento < intentos - 1:
             logging.info(
                 "[Movistar-Profundo] Mapa sin sectores habilitados; "
