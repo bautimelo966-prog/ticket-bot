@@ -240,66 +240,57 @@ def _volver_al_evento(page, url: str):
 
 
 def _contar_sectores_disponibles(page) -> int:
-    """Cuenta sectores habilitados y reintenta mientras el mapa termina de cargar.
-
-    Movistar puede mostrar el SVG antes de terminar de actualizar las clases
-    ``disabled``. Un conteo de cero se confirma tres veces antes de tratar una
-    fecha como agotada, evitando falsos negativos por una carga tardía.
-    """
+    """Cuenta sectores habilitados en la página o en cualquiera de sus iframes."""
     selector = "g.esSector:not(.disabled)"
-    intentos = 3
 
-    for intento in range(intentos):
-        cant = len(page.query_selector_all(selector))
-        if cant > 0:
-            return cant
-
-        # Algunas fechas usan polígonos SVG sin la clase ``esSector``. En ese
-        # formato, el color computado es la fuente fiable para distinguir los
-        # sectores disponibles de los agotados. Se limita a ``polygon`` para
-        # no contar el punto verde de la leyenda ni otros elementos de la UI.
-        cant_poligonos_verdes = page.locator("svg polygon").evaluate_all(
-            """(poligonos, colorDisponible) => poligonos.filter(
-                poligono => getComputedStyle(poligono).fill === colorDisponible
-            ).length""",
-            MOVISTAR_AVAILABLE_FILL,
-        )
-        if cant_poligonos_verdes > 0:
-            logging.info(
-                "[Movistar-Profundo] Detectados %s polígonos disponibles por color.",
-                cant_poligonos_verdes,
-            )
-            return cant_poligonos_verdes
-
-        # Diagnóstico temporal: cuando no hay coincidencias, deja evidencia
-        # del SVG que ve Chromium en Railway. No modifica el resultado ni
-        # genera alertas; sirve para ajustar el selector con datos reales.
-        if intento == 0:
-            try:
-                diagnostico_svg = page.locator("svg polygon").evaluate_all(
-                    """poligonos => {
-                        const colores = {};
-                        for (const poligono of poligonos) {
-                            const color = getComputedStyle(poligono).fill;
-                            colores[color] = (colores[color] || 0) + 1;
-                        }
-                        return { total: poligonos.length, colores };
-                    }"""
-                )
+    for intento in range(3):
+        diagnosticos = []
+        for indice, frame in enumerate(page.frames):
+            cant = len(frame.query_selector_all(selector))
+            if cant > 0:
                 logging.info(
-                    "[Movistar-Profundo] Diagnóstico SVG: %s polígonos; colores: %s",
-                    diagnostico_svg["total"],
-                    diagnostico_svg["colores"],
+                    "[Movistar-Profundo] Detectados %s sectores por clase en frame %s.",
+                    cant,
+                    indice,
                 )
-            except Exception as ex:
-                logging.warning("[Movistar-Profundo] No se pudo diagnosticar el SVG: %s", ex)
+                return cant
 
-        if intento < intentos - 1:
+            diagnostico_svg = frame.locator("svg polygon").evaluate_all(
+                """poligonos => {
+                    const colores = {};
+                    for (const poligono of poligonos) {
+                        const color = getComputedStyle(poligono).fill;
+                        colores[color] = (colores[color] || 0) + 1;
+                    }
+                    return { total: poligonos.length, colores };
+                }"""
+            )
+            cant_verdes = diagnostico_svg["colores"].get(MOVISTAR_AVAILABLE_FILL, 0)
+            if cant_verdes > 0:
+                logging.info(
+                    "[Movistar-Profundo] Detectados %s polígonos disponibles por color en frame %s.",
+                    cant_verdes,
+                    indice,
+                )
+                return cant_verdes
+
+            diagnosticos.append(
+                {
+                    "frame": indice,
+                    "url": frame.url[:120],
+                    "poligonos": diagnostico_svg["total"],
+                    "colores": diagnostico_svg["colores"],
+                }
+            )
+
+        if intento == 0:
+            logging.info("[Movistar-Profundo] Diagnóstico SVG por frame: %s", diagnosticos)
+
+        if intento < 2:
             logging.info(
                 "[Movistar-Profundo] Mapa sin sectores habilitados; "
-                "esperando actualización (%s/%s)...",
+                "esperando actualización (%s/2)...",
                 intento + 1,
-                intentos - 1,
             )
             page.wait_for_timeout(3000)
 
