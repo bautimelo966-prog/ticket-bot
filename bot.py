@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-URLS_FILE        = "urls.json"
+URLS_FILE        = os.environ.get("URLS_FILE", "urls.json")
 
 CHECK_INTERVAL_MOVISTAR  = 600    # 10 minutos
 CHECK_INTERVAL_ALLACCESS = 300    # 5 minutos
@@ -86,8 +86,16 @@ def load_urls() -> dict:
     return {}
 
 def save_urls(data: dict):
-    with open(URLS_FILE, "w", encoding="utf-8") as f:
+    data_dir = os.path.dirname(os.path.abspath(URLS_FILE))
+    os.makedirs(data_dir, exist_ok=True)
+
+    temp_file = f"{URLS_FILE}.tmp"
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(temp_file, URLS_FILE)
 
 # ─────────────────────────────────────────────
 # Telegram
