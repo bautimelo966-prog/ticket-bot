@@ -1045,6 +1045,28 @@ def _allaccess_global_status(page) -> str | None:
             return STATUS_SOLD_OUT
     return None
 
+
+def _allaccess_show_item_status(item, signal: str) -> str:
+    """Clasifica una función del desplegable sin depender de su texto."""
+    if any(word in signal for word in ("agotado", "sold out", "disabled")):
+        return STATUS_SOLD_OUT
+
+    # En el flujo actual, una función comprable puede mostrar únicamente la
+    # fecha. La señal estable es el enlace ``a.show`` con el id de la función.
+    try:
+        if item.query_selector("a.show"):
+            return STATUS_CANDIDATE
+    except Exception as exc:
+        logging.debug("[AllAccess] No se pudo inspeccionar a.show: %s", exc)
+
+    if any(
+        word in signal
+        for word in ("comprar", "seleccionar", "disponible", "available")
+    ):
+        return STATUS_CANDIDATE
+    return STATUS_UNKNOWN
+
+
 def _check_allaccess(url: str) -> dict:
     logging.info(f"[AllAccess] Iniciando chequeo: {url}")
     with sync_playwright() as p:
@@ -1092,20 +1114,23 @@ def _check_allaccess(url: str) -> dict:
                     if not fecha_label:
                         continue
                     signal = f"{clase} {texto}".lower()
-                    if any(word in signal for word in ("agotado", "sold out", "disabled")):
-                        fechas_estado[fecha_label] = STATUS_SOLD_OUT
-                    elif any(
-                        word in signal
-                        for word in ("comprar", "seleccionar", "disponible", "available")
-                    ):
-                        # El listado es una señal rápida, no prueba de inventario final.
-                        fechas_estado[fecha_label] = STATUS_CANDIDATE
-                    else:
-                        fechas_estado[fecha_label] = STATUS_UNKNOWN
+                    # El listado es una señal rápida, no prueba de inventario final.
+                    fechas_estado[fecha_label] = _allaccess_show_item_status(
+                        item,
+                        signal,
+                    )
                     logging.info(f"[AllAccess] {fecha_label}: {fechas_estado[fecha_label]}")
                 except Exception as ex:
                     logging.warning(f"[AllAccess] Error leyendo item: {ex}")
                     continue
+
+            # Respaldo para páginas de una sola función que publican el botón
+            # directo sin construir el desplegable.
+            if not fechas_estado and _visible_element(page, "#buyButton"):
+                fechas_estado["General"] = STATUS_CANDIDATE
+                logging.info(
+                    "[AllAccess] Botón Ver entradas habilitado sin dropdown"
+                )
         finally:
             browser.close()
             logging.info("[AllAccess] Browser cerrado")
