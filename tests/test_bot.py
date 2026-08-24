@@ -129,6 +129,27 @@ class AllAccessTests(unittest.TestCase):
 
         self.assertIsNone(bot._allaccess_global_status(page))
 
+    def test_date_only_selectable_show_is_candidate(self):
+        item = MagicMock()
+        item.query_selector.return_value = MagicMock()
+
+        self.assertEqual(
+            bot._allaccess_show_item_status(
+                item,
+                "25/02/2027 20:00 - 25 de febrero de 2027",
+            ),
+            bot.STATUS_CANDIDATE,
+        )
+
+    def test_explicit_sold_out_wins_over_selectable_template(self):
+        item = MagicMock()
+        item.query_selector.return_value = MagicMock()
+
+        self.assertEqual(
+            bot._allaccess_show_item_status(item, "agotado disabled"),
+            bot.STATUS_SOLD_OUT,
+        )
+
 
 class MovistarVerificationTests(unittest.TestCase):
     @staticmethod
