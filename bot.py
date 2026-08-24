@@ -1005,6 +1005,46 @@ def _check_movistar_profundo(url: str) -> dict:
 # Checker AllAccess estándar
 # ─────────────────────────────────────────────
 
+def _visible_element(page, selector: str):
+    """Devuelve el primer elemento visible para un selector, si existe."""
+    try:
+        element = page.query_selector(selector)
+        if element and element.is_visible():
+            return element
+    except Exception as exc:
+        logging.debug(
+            "[AllAccess] No se pudo inspeccionar el selector %s: %s",
+            selector,
+            exc,
+        )
+    return None
+
+
+def _allaccess_global_status(page) -> str | None:
+    """
+    Lee estados explícitos publicados en la cabecera del evento.
+
+    Los eventos agotados de una sola función no muestran ``#show-dropdown``.
+    AllAccess publica en cambio ``event-status status-soldout``; si no se
+    consulta antes del desplegable, un agotado confirmado termina como
+    ``unknown`` y se pierde la línea base necesaria para detectar una futura
+    liberación.
+    """
+    sold_out_selectors = (
+        "div.event-status.status-soldout",
+        ".event-status.soldout",
+        "[data-status='soldout']",
+        "[data-status='sold-out']",
+    )
+    for selector in sold_out_selectors:
+        if _visible_element(page, selector):
+            logging.info(
+                "[AllAccess] Agotado global confirmado por selector: %s",
+                selector,
+            )
+            return STATUS_SOLD_OUT
+    return None
+
 def _check_allaccess(url: str) -> dict:
     logging.info(f"[AllAccess] Iniciando chequeo: {url}")
     with sync_playwright() as p:
@@ -1023,6 +1063,14 @@ def _check_allaccess(url: str) -> dict:
                     "status": STATUS_BLOCKED,
                     "snippet": blocked,
                     "fechas": {"General": STATUS_BLOCKED},
+                }
+
+            global_status = _allaccess_global_status(page)
+            if global_status:
+                return {
+                    "status": global_status,
+                    "snippet": "agotado global confirmado",
+                    "fechas": {"General": global_status},
                 }
 
             try:
