@@ -217,6 +217,45 @@ class MovistarVerificationTests(unittest.TestCase):
         self.assertEqual(result["status"], bot.STATUS_AVAILABLE)
         self.assertEqual(result["seat_count"], 2)
 
+    def test_current_public_event_row_reads_date(self):
+        row = MagicMock()
+        day = MagicMock()
+        day.inner_text.return_value = "21"
+        month = MagicMock()
+        month.inner_text.return_value = "Octubre"
+        row.query_selector.side_effect = lambda selector: {
+            "div.fecha p": day,
+            "div.fecha span": month,
+        }.get(selector)
+
+        self.assertEqual(bot._movistar_row_label(row, 0), "21 de Octubre")
+
+    def test_current_public_event_row_detects_sold_out(self):
+        page = MagicMock()
+        row = MagicMock()
+        page.query_selector_all.return_value = [row]
+
+        with patch.object(bot, "_wait_after_navigation"):
+            with patch.object(bot, "page_block_reason", return_value=""):
+                with patch.object(
+                    bot,
+                    "_find_movistar_purchase_button",
+                    return_value=None,
+                ):
+                    with patch.object(
+                        bot,
+                        "_has_explicit_sold_out",
+                        return_value=True,
+                    ):
+                        status = bot._enter_event_row_map(
+                            page,
+                            "https://www.movistararena.com.ar/show/test",
+                            0,
+                        )
+
+        self.assertEqual(status, bot.STATUS_SOLD_OUT)
+        page.query_selector_all.assert_called_once_with("div.evento-row")
+
 
 class AlertDeliveryTests(unittest.TestCase):
     def setUp(self):
