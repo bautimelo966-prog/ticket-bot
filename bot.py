@@ -818,12 +818,12 @@ def _enter_calendar_map(page, url: str, date_index: int) -> str:
     return "entered"
 
 
-def _enter_list_map(page, url: str, row_index: int) -> str:
+def _enter_row_map(page, url: str, row_index: int, selector: str) -> str:
     page.goto(url, timeout=30000)
     _wait_after_navigation(page)
     if page_block_reason(page):
         return STATUS_BLOCKED
-    rows = page.query_selector_all("div.shows-listado div.show")
+    rows = page.query_selector_all(selector)
     if row_index >= len(rows):
         raise IndexError(f"Fila {row_index} fuera de rango")
     button = _find_movistar_purchase_button(rows[row_index])
@@ -836,6 +836,31 @@ def _enter_list_map(page, url: str, row_index: int) -> str:
     button.click()
     _wait_after_navigation(page)
     return "entered"
+
+
+def _enter_list_map(page, url: str, row_index: int) -> str:
+    return _enter_row_map(
+        page,
+        url,
+        row_index,
+        "div.shows-listado div.show",
+    )
+
+
+def _enter_event_row_map(page, url: str, row_index: int) -> str:
+    """Abre una función del formato público actual ``div.evento-row``."""
+    return _enter_row_map(page, url, row_index, "div.evento-row")
+
+
+def _movistar_row_label(row, index: int) -> str:
+    try:
+        day_el = row.query_selector("div.fecha p")
+        month_el = row.query_selector("div.fecha span")
+        day = day_el.inner_text().strip() if day_el else ""
+        month = month_el.inner_text().strip() if month_el else ""
+        return f"{day} de {month}".strip() or f"Fecha {index + 1}"
+    except Exception:
+        return f"Fecha {index + 1}"
 
 
 def _new_map_page(context, enter_map):
@@ -877,6 +902,7 @@ def _check_movistar_profundo(url: str) -> dict:
 
             calendar_dates = page.query_selector_all("button.dia-evento")
             rows = page.query_selector_all("div.shows-listado div.show")
+            event_rows = page.query_selector_all("div.evento-row")
 
             if calendar_dates:
                 month = _get_mes_texto(page)
@@ -926,18 +952,10 @@ def _check_movistar_profundo(url: str) -> dict:
                         evidence_by_date[label] = [str(exc)]
 
             elif rows:
-                labels = []
-                for index, row in enumerate(rows):
-                    try:
-                        day_el = row.query_selector("div.fecha p")
-                        month_el = row.query_selector("div.fecha span")
-                        day = day_el.inner_text().strip() if day_el else ""
-                        month = month_el.inner_text().strip() if month_el else ""
-                        labels.append(
-                            f"{day} de {month}".strip() or f"Fecha {index + 1}"
-                        )
-                    except Exception:
-                        labels.append(f"Fecha {index + 1}")
+                labels = [
+                    _movistar_row_label(row, index)
+                    for index, row in enumerate(rows)
+                ]
 
                 for index, label in enumerate(labels):
                     try:
@@ -974,10 +992,55 @@ def _check_movistar_profundo(url: str) -> dict:
                         )
                         fechas_estado[label] = STATUS_UNKNOWN
                         evidence_by_date[label] = [str(exc)]
+            elif event_rows:
+                labels = [
+                    _movistar_row_label(row, index)
+                    for index, row in enumerate(event_rows)
+                ]
+
+                for index, label in enumerate(labels):
+                    try:
+                        enter_status = _enter_event_row_map(page, url, index)
+                        if enter_status != "entered":
+                            fechas_estado[label] = enter_status
+                            sector_counts[label] = 0
+                            seat_counts[label] = 0
+                            continue
+
+                        inspect = _inspect_movistar_map(
+                            page,
+                            lambda idx=index: _new_map_page(
+                                page.context,
+                                lambda extra: _enter_event_row_map(
+                                    extra,
+                                    url,
+                                    idx,
+                                ),
+                            ),
+                        )
+                        fechas_estado[label] = inspect["status"]
+                        sector_counts[label] = inspect["candidate_count"]
+                        seat_counts[label] = inspect["seat_count"]
+                        evidence_by_date[label] = inspect["evidence"]
+                        logging.info(
+                            "[Movistar-Profundo] %s: %s | sectores=%s | "
+                            "inventario=%s | evidencia=%s",
+                            label,
+                            inspect["status"],
+                            inspect["candidate_count"],
+                            inspect["seat_count"],
+                            inspect["evidence"][:5],
+                        )
+                    except Exception as exc:
+                        logging.exception(
+                            "[Movistar-Profundo] Error verificando %s", label
+                        )
+                        fechas_estado[label] = STATUS_UNKNOWN
+                        evidence_by_date[label] = [str(exc)]
             else:
                 fechas_estado["General"] = STATUS_UNKNOWN
                 evidence_by_date["General"] = [
-                    "No apareció calendario ni listado de funciones"
+                    "No apareció calendario ni listado de funciones conocido"
                 ]
         finally:
             browser.close()
