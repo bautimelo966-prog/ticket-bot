@@ -101,6 +101,35 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["status"], bot.STATUS_UNKNOWN)
 
 
+class AllAccessTests(unittest.TestCase):
+    def test_visible_global_sold_out_is_detected_without_dropdown(self):
+        page = MagicMock()
+        sold_out = MagicMock()
+        sold_out.is_visible.return_value = True
+        page.query_selector.side_effect = lambda selector: (
+            sold_out
+            if selector == "div.event-status.status-soldout"
+            else None
+        )
+
+        self.assertEqual(
+            bot._allaccess_global_status(page),
+            bot.STATUS_SOLD_OUT,
+        )
+
+    def test_hidden_global_sold_out_template_is_ignored(self):
+        page = MagicMock()
+        hidden = MagicMock()
+        hidden.is_visible.return_value = False
+        page.query_selector.side_effect = lambda selector: (
+            hidden
+            if selector == "div.event-status.status-soldout"
+            else None
+        )
+
+        self.assertIsNone(bot._allaccess_global_status(page))
+
+
 class MovistarVerificationTests(unittest.TestCase):
     @staticmethod
     def _locator(count):
