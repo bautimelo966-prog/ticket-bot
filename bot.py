@@ -37,7 +37,9 @@ PLAYWRIGHT_TIMEOUT       = int(os.environ.get("PLAYWRIGHT_TIMEOUT", "240"))
 TELEGRAM_RETRIES         = int(os.environ.get("TELEGRAM_RETRIES", "4"))
 MAX_SECTORS_TO_VERIFY    = int(os.environ.get("MAX_SECTORS_TO_VERIFY", "30"))
 MAX_CONCURRENT_CHECKS    = int(os.environ.get("MAX_CONCURRENT_CHECKS", "2"))
-HEALTH_ALERT_INTERVAL    = int(os.environ.get("HEALTH_ALERT_INTERVAL", "3600"))
+HEALTH_FAILURE_THRESHOLD = int(os.environ.get("HEALTH_FAILURE_THRESHOLD", "3"))
+UNRELIABLE_RETRY_BASE    = int(os.environ.get("UNRELIABLE_RETRY_BASE", "30"))
+UNRELIABLE_RETRY_MAX     = int(os.environ.get("UNRELIABLE_RETRY_MAX", "120"))
 
 STATUS_AVAILABLE = "available"
 STATUS_CANDIDATE = "candidate"
@@ -57,6 +59,12 @@ KNOWN_STATUSES = {
 
 UNRELIABLE_STATUSES = {STATUS_UNKNOWN, STATUS_BLOCKED, STATUS_ERROR}
 
+
+def unreliable_retry_delay(failure_count: int) -> int:
+    """Calcula 30s, 60s, 120s... sin superar el máximo configurado."""
+    exponent = max(0, int(failure_count) - 1)
+    return min(UNRELIABLE_RETRY_BASE * (2 ** exponent), UNRELIABLE_RETRY_MAX)
+
 BTS_URL     = "https://www.allaccess.com.ar/event/bts"
 
 BTS_FECHAS = [
@@ -72,6 +80,7 @@ VIP_KEYWORDS = ["diamond", "gold", "silver", "vip", "platinum", "black"]
 MOVISTAR_AVAILABLE_FILL = "rgb(91, 203, 94)"
 
 MOVISTAR_SECTOR_SELECTOR = "g.esSector:not(.disabled)"
+MOVISTAR_PURCHASE_SIGNAL_FAILED = "purchase_signal_failed"
 
 # Señales fuertes: estos selectores deben apuntar a inventario seleccionable,
 # no simplemente a un sector habilitado del mapa general.
@@ -813,8 +822,16 @@ def _enter_calendar_map(page, url: str, date_index: int) -> str:
     button = _find_movistar_purchase_button(page)
     if not button:
         return STATUS_SOLD_OUT if _has_explicit_sold_out(page) else STATUS_UNKNOWN
-    button.click()
-    _wait_after_navigation(page)
+    try:
+        button.click()
+        _wait_after_navigation(page)
+    except Exception as exc:
+        logging.warning(
+            "[Movistar-Profundo] Apareció Comprar/Seleccionar, "
+            "pero no se abrió el mapa: %s",
+            exc,
+        )
+        return MOVISTAR_PURCHASE_SIGNAL_FAILED
     return "entered"
 
 
@@ -833,8 +850,16 @@ def _enter_row_map(page, url: str, row_index: int, selector: str) -> str:
             if _has_explicit_sold_out(rows[row_index])
             else STATUS_UNKNOWN
         )
-    button.click()
-    _wait_after_navigation(page)
+    try:
+        button.click()
+        _wait_after_navigation(page)
+    except Exception as exc:
+        logging.warning(
+            "[Movistar-Profundo] Apareció Comprar/Seleccionar, "
+            "pero no se abrió el mapa: %s",
+            exc,
+        )
+        return MOVISTAR_PURCHASE_SIGNAL_FAILED
     return "entered"
 
 
@@ -881,6 +906,7 @@ def _check_movistar_profundo(url: str) -> dict:
     sector_counts = {}
     seat_counts = {}
     evidence_by_date = {}
+    purchase_signals = {}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
@@ -898,6 +924,7 @@ def _check_movistar_profundo(url: str) -> dict:
                     "fechas": {"General": STATUS_BLOCKED},
                     "sector_counts": {},
                     "seat_counts": {},
+                    "purchase_signals": {},
                 }
 
             calendar_dates = page.query_selector_all("button.dia-evento")
@@ -918,10 +945,22 @@ def _check_movistar_profundo(url: str) -> dict:
                 for index, label in enumerate(labels):
                     try:
                         enter_status = _enter_calendar_map(page, url, index)
+                        purchase_signals[label] = enter_status in (
+                            "entered",
+                            MOVISTAR_PURCHASE_SIGNAL_FAILED,
+                        )
                         if enter_status != "entered":
-                            fechas_estado[label] = enter_status
+                            fechas_estado[label] = (
+                                STATUS_UNKNOWN
+                                if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED
+                                else enter_status
+                            )
                             sector_counts[label] = 0
                             seat_counts[label] = 0
+                            if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED:
+                                evidence_by_date[label] = [
+                                    "Comprar/Seleccionar visible; el mapa no abrió"
+                                ]
                             continue
 
                         inspect = _inspect_movistar_map(
@@ -948,6 +987,7 @@ def _check_movistar_profundo(url: str) -> dict:
                         logging.exception(
                             "[Movistar-Profundo] Error verificando %s", label
                         )
+                        purchase_signals.setdefault(label, False)
                         fechas_estado[label] = STATUS_UNKNOWN
                         evidence_by_date[label] = [str(exc)]
 
@@ -960,10 +1000,22 @@ def _check_movistar_profundo(url: str) -> dict:
                 for index, label in enumerate(labels):
                     try:
                         enter_status = _enter_list_map(page, url, index)
+                        purchase_signals[label] = enter_status in (
+                            "entered",
+                            MOVISTAR_PURCHASE_SIGNAL_FAILED,
+                        )
                         if enter_status != "entered":
-                            fechas_estado[label] = enter_status
+                            fechas_estado[label] = (
+                                STATUS_UNKNOWN
+                                if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED
+                                else enter_status
+                            )
                             sector_counts[label] = 0
                             seat_counts[label] = 0
+                            if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED:
+                                evidence_by_date[label] = [
+                                    "Comprar/Seleccionar visible; el mapa no abrió"
+                                ]
                             continue
 
                         inspect = _inspect_movistar_map(
@@ -990,6 +1042,7 @@ def _check_movistar_profundo(url: str) -> dict:
                         logging.exception(
                             "[Movistar-Profundo] Error verificando %s", label
                         )
+                        purchase_signals.setdefault(label, False)
                         fechas_estado[label] = STATUS_UNKNOWN
                         evidence_by_date[label] = [str(exc)]
             elif event_rows:
@@ -1001,10 +1054,22 @@ def _check_movistar_profundo(url: str) -> dict:
                 for index, label in enumerate(labels):
                     try:
                         enter_status = _enter_event_row_map(page, url, index)
+                        purchase_signals[label] = enter_status in (
+                            "entered",
+                            MOVISTAR_PURCHASE_SIGNAL_FAILED,
+                        )
                         if enter_status != "entered":
-                            fechas_estado[label] = enter_status
+                            fechas_estado[label] = (
+                                STATUS_UNKNOWN
+                                if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED
+                                else enter_status
+                            )
                             sector_counts[label] = 0
                             seat_counts[label] = 0
+                            if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED:
+                                evidence_by_date[label] = [
+                                    "Comprar/Seleccionar visible; el mapa no abrió"
+                                ]
                             continue
 
                         inspect = _inspect_movistar_map(
@@ -1035,6 +1100,7 @@ def _check_movistar_profundo(url: str) -> dict:
                         logging.exception(
                             "[Movistar-Profundo] Error verificando %s", label
                         )
+                        purchase_signals.setdefault(label, False)
                         fechas_estado[label] = STATUS_UNKNOWN
                         evidence_by_date[label] = [str(exc)]
             else:
@@ -1042,6 +1108,7 @@ def _check_movistar_profundo(url: str) -> dict:
                 evidence_by_date["General"] = [
                     "No apareció calendario ni listado de funciones conocido"
                 ]
+                purchase_signals["General"] = False
         finally:
             browser.close()
             logging.info("[Movistar-Profundo] Browser cerrado")
@@ -1061,6 +1128,7 @@ def _check_movistar_profundo(url: str) -> dict:
         "sector_counts": sector_counts,
         "seat_counts": seat_counts,
         "evidence": evidence_by_date,
+        "purchase_signals": purchase_signals,
     }
 
 
@@ -1488,6 +1556,9 @@ def handle_command(text: str, urls: dict) -> str:
             "last_known_fechas": {},
             "pending_alerts": [],
             "consecutive_failures": 0,
+            "next_retry_at": 0,
+            "health_alert_active": False,
+            "purchase_signals": {},
             "added": datetime.now().isoformat()
         }
         save_urls(urls)
@@ -1590,8 +1661,11 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
 
     for url, data in urls.items():
         interval   = get_interval(url)
-        last_check = data.get("last_check", 0)
-        if force or (now - last_check >= interval):
+        last_check = float(data.get("last_check", 0) or 0)
+        retry_at   = float(data.get("next_retry_at", 0) or 0)
+        retry_due  = bool(retry_at and now >= retry_at)
+        normal_due = not retry_at and now - last_check >= interval
+        if force or retry_due or normal_due:
             urls_to_check.append(url)
 
     if not urls_to_check:
@@ -1621,7 +1695,7 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
         name          = data["name"]
         observed_prev = data.get("fechas", {})
         known_prev    = data.get("last_known_fechas", observed_prev.copy())
-        status_prev   = data.get("last_status", STATUS_UNKNOWN)
+        purchase_signals_prev = data.get("purchase_signals", {})
 
         log.info(f"Iniciando chequeo: {name}")
         result        = results[url]
@@ -1642,7 +1716,8 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             elif (
                 estado == STATUS_CANDIDATE
                 and observed_prev.get(fecha) != STATUS_CANDIDATE
-                and known_prev.get(fecha) != STATUS_AVAILABLE
+                and known_prev.get(fecha)
+                not in (STATUS_AVAILABLE, STATUS_CANDIDATE)
             ):
                 candidate_dates.append(fecha)
 
@@ -1662,6 +1737,24 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
                     fecha,
                     prev_cant,
                     cant,
+                )
+
+        purchase_signals_new = result.get("purchase_signals", {})
+        if not isinstance(purchase_signals_new, dict):
+            purchase_signals_new = {}
+        for fecha, detected in purchase_signals_new.items():
+            if (
+                detected
+                and not purchase_signals_prev.get(fecha, False)
+                and nuevas_fechas.get(fecha) in UNRELIABLE_STATUSES
+                and known_prev.get(fecha) != STATUS_AVAILABLE
+                and fecha not in candidate_dates
+            ):
+                candidate_dates.append(fecha)
+                logging.info(
+                    "  🟡 %s — %s: apareció Comprar/Seleccionar",
+                    name,
+                    fecha,
                 )
 
         if confirmed_dates:
@@ -1696,18 +1789,29 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             )
 
         previous_check = float(data.get("last_check", 0) or 0)
-        last_health_alert = float(data.get("last_health_alert", 0) or 0)
-        health_due = now - last_health_alert >= HEALTH_ALERT_INTERVAL
+        health_alert_active = bool(data.get("health_alert_active", False))
+        data["health_alert_active"] = health_alert_active
+        checked_at = time.time()
         if new_status in UNRELIABLE_STATUSES:
             data["consecutive_failures"] = int(
                 data.get("consecutive_failures", 0)
             ) + 1
+            retry_delay = unreliable_retry_delay(data["consecutive_failures"])
+            data["next_retry_at"] = checked_at + retry_delay
+            logging.warning(
+                "  Reintento rápido de %s en %ss (fallo %s)",
+                name,
+                retry_delay,
+                data["consecutive_failures"],
+            )
         else:
             data["consecutive_failures"] = 0
+            data["next_retry_at"] = 0
 
         if (
             new_status in UNRELIABLE_STATUSES
-            and (status_prev != new_status or health_due)
+            and data["consecutive_failures"] >= HEALTH_FAILURE_THRESHOLD
+            and not health_alert_active
         ):
             label = {
                 STATUS_UNKNOWN: "Resultado indeterminado",
@@ -1717,19 +1821,22 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             snippet = str(result.get("snippet", ""))[:300]
             queue_alert(
                 data,
-                f"health:{new_status}",
+                "health:unreliable",
                 (
-                    f"⚠️ <b>{escape(label)}: {escape(str(name))}</b>\n\n"
+                    f"⚠️ <b>Problema persistente: {escape(str(name))}</b>\n\n"
+                    f"{escape(label)} durante "
+                    f"{data['consecutive_failures']} chequeos seguidos.\n"
                     f"<i>{escape(snippet or 'Sin detalle adicional')}</i>\n\n"
-                    "No se interpretó como agotado. El bot seguirá intentando."
+                    "No se interpretó como agotado. Seguiré haciendo "
+                    "reintentos rápidos; conviene revisar manualmente."
                 ),
             )
-            data["last_health_alert"] = now
+            data["health_alert_active"] = True
 
         if (
             previous_check
-            and status_prev in UNRELIABLE_STATUSES
             and new_status not in UNRELIABLE_STATUSES
+            and health_alert_active
         ):
             queue_alert(
                 data,
@@ -1739,6 +1846,7 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
                     f"Estado actual: <code>{escape(new_status)}</code>."
                 ),
             )
+            data["health_alert_active"] = False
 
         emoji = {
             STATUS_AVAILABLE: "🚨",
@@ -1768,14 +1876,29 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             if estado not in UNRELIABLE_STATUSES:
                 known_next[fecha] = estado
 
+        purchase_signals_next = dict(purchase_signals_prev)
+        for fecha, detected in purchase_signals_new.items():
+            estado = nuevas_fechas.get(fecha, STATUS_UNKNOWN)
+            if detected:
+                purchase_signals_next[fecha] = True
+            elif estado not in UNRELIABLE_STATUSES:
+                purchase_signals_next[fecha] = False
+
+        sector_counts_next = dict(sector_counts_prev)
+        for fecha, count in sector_counts_new.items():
+            estado = nuevas_fechas.get(fecha, STATUS_UNKNOWN)
+            if estado not in UNRELIABLE_STATUSES:
+                sector_counts_next[fecha] = count
+
         urls[url]["last_status"]   = new_status
         urls[url]["fechas"]        = nuevas_fechas
         urls[url]["last_known_fechas"] = known_next
-        urls[url]["last_check"]    = now
+        urls[url]["last_check"]    = checked_at
         urls[url]["last_snippet"]  = result.get("snippet", "")
-        urls[url]["sector_counts"] = sector_counts_new
+        urls[url]["sector_counts"] = sector_counts_next
         urls[url]["seat_counts"]   = result.get("seat_counts", {})
         urls[url]["last_evidence"] = result.get("evidence", {})
+        urls[url]["purchase_signals"] = purchase_signals_next
         if new_status not in UNRELIABLE_STATUSES:
             urls[url]["last_reliable_check"] = now
 
