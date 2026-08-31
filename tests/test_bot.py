@@ -256,6 +256,28 @@ class MovistarVerificationTests(unittest.TestCase):
         self.assertEqual(status, bot.STATUS_SOLD_OUT)
         page.query_selector_all.assert_called_once_with("div.evento-row")
 
+    def test_purchase_button_is_preserved_when_map_navigation_fails(self):
+        page = MagicMock()
+        row = MagicMock()
+        button = MagicMock()
+        button.click.side_effect = RuntimeError("mapa lento")
+        page.query_selector_all.return_value = [row]
+
+        with patch.object(bot, "_wait_after_navigation"):
+            with patch.object(bot, "page_block_reason", return_value=""):
+                with patch.object(
+                    bot,
+                    "_find_movistar_purchase_button",
+                    return_value=button,
+                ):
+                    status = bot._enter_event_row_map(
+                        page,
+                        "https://www.movistararena.com.ar/show/test",
+                        0,
+                    )
+
+        self.assertEqual(status, bot.MOVISTAR_PURCHASE_SIGNAL_FAILED)
+
 
 class AlertDeliveryTests(unittest.TestCase):
     def setUp(self):
@@ -332,6 +354,7 @@ class AlertDeliveryTests(unittest.TestCase):
                 "last_known_fechas": {"General": bot.STATUS_SOLD_OUT},
                 "pending_alerts": [],
                 "consecutive_failures": 3,
+                "health_alert_active": True,
             }
         }
         result = {
@@ -347,7 +370,202 @@ class AlertDeliveryTests(unittest.TestCase):
                 bot.run_check(urls, force=True)
 
         self.assertEqual(urls[url]["consecutive_failures"], 0)
+        self.assertFalse(urls[url]["health_alert_active"])
         self.assertTrue(any("Chequeo recuperado" in text for text in sent))
+
+    def test_transient_unknown_retries_quickly_without_telegram_noise(self):
+        url = "https://www.movistararena.com.ar/show/test"
+        urls = {
+            url: {
+                "name": "Show",
+                "last_status": bot.STATUS_SOLD_OUT,
+                "last_check": 900,
+                "fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "last_known_fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "pending_alerts": [],
+                "consecutive_failures": 0,
+            }
+        }
+        unknown = {
+            "status": bot.STATUS_UNKNOWN,
+            "snippet": "fila incompleta",
+            "fechas": {"Fecha": bot.STATUS_UNKNOWN},
+        }
+        sent = []
+        with patch.object(bot.time, "time", return_value=1000):
+            with patch.object(bot, "check_url", return_value=unknown):
+                with patch.object(
+                    bot, "send_telegram", side_effect=lambda text: sent.append(text) or True
+                ):
+                    bot.run_check(urls, force=True)
+
+        self.assertEqual(urls[url]["consecutive_failures"], 1)
+        self.assertEqual(urls[url]["next_retry_at"], 1030)
+        self.assertFalse(urls[url]["health_alert_active"])
+        self.assertEqual(sent, [])
+
+    def test_retry_due_runs_before_normal_movistar_interval(self):
+        url = "https://www.movistararena.com.ar/show/test"
+        urls = {
+            url: {
+                "name": "Show",
+                "last_status": bot.STATUS_UNKNOWN,
+                "last_check": 1000,
+                "next_retry_at": 1030,
+                "fechas": {"Fecha": bot.STATUS_UNKNOWN},
+                "last_known_fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "pending_alerts": [],
+                "consecutive_failures": 1,
+            }
+        }
+        sold_out = {
+            "status": bot.STATUS_SOLD_OUT,
+            "snippet": "agotado",
+            "fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+        }
+        checker = MagicMock(return_value=sold_out)
+        with patch.object(bot, "check_url", checker):
+            with patch.object(bot, "send_telegram", return_value=True):
+                with patch.object(bot.time, "time", return_value=1029):
+                    bot.run_check(urls)
+                checker.assert_not_called()
+                with patch.object(bot.time, "time", return_value=1030):
+                    bot.run_check(urls)
+
+        checker.assert_called_once_with(url)
+        self.assertEqual(urls[url]["consecutive_failures"], 0)
+        self.assertEqual(urls[url]["next_retry_at"], 0)
+
+    def test_health_alert_waits_for_three_failures_and_is_not_repeated(self):
+        url = "https://www.movistararena.com.ar/show/test"
+        urls = {
+            url: {
+                "name": "Show",
+                "last_status": bot.STATUS_SOLD_OUT,
+                "last_check": 0,
+                "fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "last_known_fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "pending_alerts": [],
+                "consecutive_failures": 0,
+            }
+        }
+        unknown = {
+            "status": bot.STATUS_UNKNOWN,
+            "snippet": "fila incompleta",
+            "fechas": {"Fecha": bot.STATUS_UNKNOWN},
+        }
+        sent = []
+        with patch.object(bot, "check_url", return_value=unknown):
+            with patch.object(
+                bot, "send_telegram", side_effect=lambda text: sent.append(text) or True
+            ):
+                for timestamp in (1000, 1030):
+                    with patch.object(bot.time, "time", return_value=timestamp):
+                        bot.run_check(urls, force=True)
+                self.assertEqual(sent, [])
+                with patch.object(bot.time, "time", return_value=1090):
+                    bot.run_check(urls, force=True)
+                with patch.object(bot.time, "time", return_value=1210):
+                    bot.run_check(urls, force=True)
+
+        health_messages = [text for text in sent if "Problema persistente" in text]
+        self.assertEqual(len(health_messages), 1)
+        self.assertTrue(urls[url]["health_alert_active"])
+
+    def test_recovery_after_transient_failure_is_silent(self):
+        url = "https://www.movistararena.com.ar/show/test"
+        urls = {
+            url: {
+                "name": "Show",
+                "last_status": bot.STATUS_UNKNOWN,
+                "last_check": 1000,
+                "next_retry_at": 1030,
+                "fechas": {"Fecha": bot.STATUS_UNKNOWN},
+                "last_known_fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "pending_alerts": [],
+                "consecutive_failures": 1,
+                "health_alert_active": False,
+            }
+        }
+        sold_out = {
+            "status": bot.STATUS_SOLD_OUT,
+            "snippet": "agotado",
+            "fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+        }
+        sent = []
+        with patch.object(bot.time, "time", return_value=1030):
+            with patch.object(bot, "check_url", return_value=sold_out):
+                with patch.object(
+                    bot, "send_telegram", side_effect=lambda text: sent.append(text) or True
+                ):
+                    bot.run_check(urls)
+
+        self.assertFalse(any("Chequeo recuperado" in text for text in sent))
+
+    def test_purchase_button_does_not_alert_when_map_confirms_no_inventory(self):
+        url = "https://www.movistararena.com.ar/show/test"
+        urls = {
+            url: {
+                "name": "Show",
+                "last_status": bot.STATUS_SOLD_OUT,
+                "last_check": 0,
+                "fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "last_known_fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "pending_alerts": [],
+                "consecutive_failures": 0,
+                "purchase_signals": {"Fecha": False},
+            }
+        }
+        selector_without_stock = {
+            "status": bot.STATUS_SOLD_OUT,
+            "snippet": "mapa sin inventario",
+            "fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+            "purchase_signals": {"Fecha": True},
+            "sector_counts": {"Fecha": 0},
+        }
+        sent = []
+        with patch.object(bot, "check_url", return_value=selector_without_stock):
+            with patch.object(
+                bot, "send_telegram", side_effect=lambda text: sent.append(text) or True
+            ):
+                bot.run_check(urls, force=True)
+                bot.run_check(urls, force=True)
+
+        candidate_messages = [text for text in sent if "POSIBLE LIBERACIÓN" in text]
+        self.assertEqual(candidate_messages, [])
+        self.assertTrue(urls[url]["purchase_signals"]["Fecha"])
+
+    def test_purchase_signal_alerts_and_retries_when_map_check_is_unknown(self):
+        url = "https://www.movistararena.com.ar/show/test"
+        urls = {
+            url: {
+                "name": "Show",
+                "last_status": bot.STATUS_SOLD_OUT,
+                "last_check": 0,
+                "fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "last_known_fechas": {"Fecha": bot.STATUS_SOLD_OUT},
+                "pending_alerts": [],
+                "consecutive_failures": 0,
+                "purchase_signals": {"Fecha": False},
+            }
+        }
+        map_failed = {
+            "status": bot.STATUS_UNKNOWN,
+            "snippet": "no se pudo abrir el mapa",
+            "fechas": {"Fecha": bot.STATUS_UNKNOWN},
+            "purchase_signals": {"Fecha": True},
+        }
+        sent = []
+        with patch.object(bot.time, "time", return_value=1000):
+            with patch.object(bot, "check_url", return_value=map_failed):
+                with patch.object(
+                    bot, "send_telegram", side_effect=lambda text: sent.append(text) or True
+                ):
+                    bot.run_check(urls, force=True)
+
+        self.assertTrue(any("POSIBLE LIBERACIÓN" in text for text in sent))
+        self.assertEqual(urls[url]["next_retry_at"], 1030)
+        self.assertEqual(urls[url]["consecutive_failures"], 1)
 
     def test_candidate_does_not_suppress_later_confirmation(self):
         url = "https://www.movistararena.com.ar/Ticketera/test"
