@@ -710,21 +710,17 @@ def _inspect_movistar_map(page, reopen_map) -> dict:
 
     candidate_count = _contar_sectores_disponibles(page)
     if candidate_count <= 0:
-        # Ningún sector coincidió con el selector ni con el color de respaldo.
-        # Eso puede ser un agotado real o un selector desactualizado; solo se
-        # confirma agotado si el propio sitio lo dice explícitamente.
-        if _has_explicit_sold_out(page):
-            return {
-                "status": STATUS_SOLD_OUT,
-                "candidate_count": 0,
-                "seat_count": 0,
-                "evidence": ["agotado confirmado por texto explícito"],
-            }
+        # Para llegar hasta acá ya se hizo click en un botón de compra que no
+        # decía "agotado" en su fila. Si ahora no aparece ningún sector, no
+        # hay que volver a buscar "agotado" en el texto de toda la página:
+        # eso puede matchear con OTRA fecha del mismo listado (falso agotado)
+        # o con un mapa que todavía no terminó de cargar. Sin sectores ni
+        # evidencia de haber llegado al mapa real, el estado es incierto.
         return {
             "status": STATUS_UNKNOWN,
             "candidate_count": 0,
             "seat_count": 0,
-            "evidence": ["sin sectores habilitados ni marca explícita de agotado"],
+            "evidence": ["sin sectores habilitados tras entrar; no se confirma agotado"],
         }
 
     sectors_to_check = min(candidate_count, MAX_SECTORS_TO_VERIFY)
@@ -901,13 +897,15 @@ def _wait_after_navigation(page):
     page.wait_for_timeout(1500)
 
 
-def _wait_for_index(page, selector: str, index: int, attempts: int = 5, wait_ms: int = 800) -> list:
+def _wait_for_index(page, selector: str, index: int, attempts: int = 12, wait_ms: int = 1000) -> list:
     """Reintenta hasta que ``selector`` tenga al menos ``index + 1`` elementos.
 
     En páginas que renderizan filas de forma asincrónica (Blazor), que la red
     esté quieta no garantiza que el DOM ya terminó de pintar todas las filas.
-    Sin este reintento, reabrir el evento para la fecha N (N>0) puede
-    encontrar todavía menos filas de las esperadas y tirar un IndexError.
+    Logueado, el render de cada fila puede tardar bastante más que sin login
+    (probablemente trae datos de precio/disponibilidad por fila); sin este
+    reintento con margen amplio, reabrir el evento para la fecha N (N>0)
+    encuentra menos filas de las esperadas y tira un IndexError.
     """
     items = page.query_selector_all(selector)
     for _ in range(attempts):
