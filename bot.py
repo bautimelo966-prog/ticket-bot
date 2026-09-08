@@ -710,11 +710,21 @@ def _inspect_movistar_map(page, reopen_map) -> dict:
 
     candidate_count = _contar_sectores_disponibles(page)
     if candidate_count <= 0:
+        # Ningún sector coincidió con el selector ni con el color de respaldo.
+        # Eso puede ser un agotado real o un selector desactualizado; solo se
+        # confirma agotado si el propio sitio lo dice explícitamente.
+        if _has_explicit_sold_out(page):
+            return {
+                "status": STATUS_SOLD_OUT,
+                "candidate_count": 0,
+                "seat_count": 0,
+                "evidence": ["agotado confirmado por texto explícito"],
+            }
         return {
-            "status": STATUS_SOLD_OUT,
+            "status": STATUS_UNKNOWN,
             "candidate_count": 0,
             "seat_count": 0,
-            "evidence": [],
+            "evidence": ["sin sectores habilitados ni marca explícita de agotado"],
         }
 
     sectors_to_check = min(candidate_count, MAX_SECTORS_TO_VERIFY)
@@ -1250,8 +1260,13 @@ def _check_bts_fecha(page, fecha_url: str) -> str:
         return STATUS_UNKNOWN
 
     if "campo" not in contenido:
-        logging.info(f"[BTS] {fecha_label}: Campo no aparece → sold_out")
-        return STATUS_SOLD_OUT
+        # "Campo" puede no aparecer por agotado real o porque el sitio cambió
+        # de texto/estructura; solo se confirma agotado con marca explícita.
+        if "agotado" in contenido or "sold out" in contenido:
+            logging.info(f"[BTS] {fecha_label}: Campo no aparece, agotado confirmado en el panel")
+            return STATUS_SOLD_OUT
+        logging.info(f"[BTS] {fecha_label}: Campo no aparece y sin marca explícita → unknown")
+        return STATUS_UNKNOWN
 
     lineas = contenido.split("\n")
     for idx, linea in enumerate(lineas):
