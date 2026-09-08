@@ -901,13 +901,30 @@ def _wait_after_navigation(page):
     page.wait_for_timeout(1500)
 
 
+def _wait_for_index(page, selector: str, index: int, attempts: int = 5, wait_ms: int = 800) -> list:
+    """Reintenta hasta que ``selector`` tenga al menos ``index + 1`` elementos.
+
+    En páginas que renderizan filas de forma asincrónica (Blazor), que la red
+    esté quieta no garantiza que el DOM ya terminó de pintar todas las filas.
+    Sin este reintento, reabrir el evento para la fecha N (N>0) puede
+    encontrar todavía menos filas de las esperadas y tirar un IndexError.
+    """
+    items = page.query_selector_all(selector)
+    for _ in range(attempts):
+        if index < len(items):
+            break
+        page.wait_for_timeout(wait_ms)
+        items = page.query_selector_all(selector)
+    return items
+
+
 def _enter_calendar_map(page, url: str, date_index: int) -> str:
     page.goto(url, timeout=30000)
     _wait_after_navigation(page)
     if page_block_reason(page):
         return STATUS_BLOCKED
     page.wait_for_selector("button.dia-evento", timeout=15000)
-    dates = page.query_selector_all("button.dia-evento")
+    dates = _wait_for_index(page, "button.dia-evento", date_index)
     if date_index >= len(dates):
         raise IndexError(f"Fecha {date_index} fuera de rango")
     dates[date_index].click()
@@ -933,7 +950,7 @@ def _enter_row_map(page, url: str, row_index: int, selector: str) -> str:
     _wait_after_navigation(page)
     if page_block_reason(page):
         return STATUS_BLOCKED
-    rows = page.query_selector_all(selector)
+    rows = _wait_for_index(page, selector, row_index)
     if row_index >= len(rows):
         raise IndexError(f"Fila {row_index} fuera de rango")
     button = _find_movistar_purchase_button(rows[row_index])
