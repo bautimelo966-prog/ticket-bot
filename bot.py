@@ -5,6 +5,7 @@ import logging
 import requests
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from html import escape
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
@@ -420,6 +421,21 @@ def run_with_timeout(fn_name: str, url: str) -> dict:
             pass
 
 # ─────────────────────────────────────────────
+# Browser helper
+# ─────────────────────────────────────────────
+
+@contextmanager
+def _browser_page(label: str):
+    """Abre una página de Chromium y garantiza el cierre del browser."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
+        try:
+            yield browser.new_page()
+        finally:
+            browser.close()
+            logging.info("[%s] Browser cerrado", label)
+
+# ─────────────────────────────────────────────
 # Login Movistar
 # ─────────────────────────────────────────────
 
@@ -471,7 +487,7 @@ def _volver_al_evento(page, url: str):
 
 def _contar_sectores_disponibles(page) -> int:
     """Cuenta sectores habilitados en la página o en cualquiera de sus iframes."""
-    selector = "g.esSector:not(.disabled)"
+    selector = MOVISTAR_SECTOR_SELECTOR
 
     for intento in range(3):
         diagnosticos = []
@@ -762,6 +778,73 @@ def _inspect_movistar_map(page, reopen_map) -> dict:
 # Checker profundo Movistar Arena (todas las URLs)
 # ─────────────────────────────────────────────
 
+def _process_movistar_labels(
+    page,
+    url: str,
+    labels: list,
+    enter_fn,
+    fechas_estado: dict,
+    sector_counts: dict,
+    seat_counts: dict,
+    evidence_by_date: dict,
+    purchase_signals: dict,
+):
+    """Recorre cada función/fecha, entra a su mapa y confirma inventario.
+
+    Común a los tres formatos de listado de Movistar (calendario, listado
+    de shows y evento-row); solo cambia ``enter_fn``, que comparte la firma
+    ``(page, url, index)`` en los tres casos.
+    """
+    for index, label in enumerate(labels):
+        try:
+            enter_status = enter_fn(page, url, index)
+            purchase_signals[label] = enter_status in (
+                "entered",
+                MOVISTAR_PURCHASE_SIGNAL_FAILED,
+            )
+            if enter_status != "entered":
+                fechas_estado[label] = (
+                    STATUS_UNKNOWN
+                    if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED
+                    else enter_status
+                )
+                sector_counts[label] = 0
+                seat_counts[label] = 0
+                if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED:
+                    evidence_by_date[label] = [
+                        "Comprar/Seleccionar visible; el mapa no abrió"
+                    ]
+                continue
+
+            inspect = _inspect_movistar_map(
+                page,
+                lambda idx=index: _new_map_page(
+                    page.context,
+                    lambda extra: enter_fn(extra, url, idx),
+                ),
+            )
+            fechas_estado[label] = inspect["status"]
+            sector_counts[label] = inspect["candidate_count"]
+            seat_counts[label] = inspect["seat_count"]
+            evidence_by_date[label] = inspect["evidence"]
+            logging.info(
+                "[Movistar-Profundo] %s: %s | sectores=%s | "
+                "inventario=%s | evidencia=%s",
+                label,
+                inspect["status"],
+                inspect["candidate_count"],
+                inspect["seat_count"],
+                inspect["evidence"][:5],
+            )
+        except Exception as exc:
+            logging.exception(
+                "[Movistar-Profundo] Error verificando %s", label
+            )
+            purchase_signals.setdefault(label, False)
+            fechas_estado[label] = STATUS_UNKNOWN
+            evidence_by_date[label] = [str(exc)]
+
+
 def _find_movistar_purchase_button(root):
     buttons = root.query_selector_all("span.mud-button-label")
     for button in buttons:
@@ -908,210 +991,69 @@ def _check_movistar_profundo(url: str) -> dict:
     evidence_by_date = {}
     purchase_signals = {}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
-        try:
-            page = browser.new_page()
-            _login_movistar(page)
-            page.goto(url, timeout=30000)
-            _wait_after_navigation(page)
+    with _browser_page("Movistar-Profundo") as page:
+        _login_movistar(page)
+        page.goto(url, timeout=30000)
+        _wait_after_navigation(page)
 
-            blocked = page_block_reason(page)
-            if blocked:
-                return {
-                    "status": STATUS_BLOCKED,
-                    "snippet": blocked,
-                    "fechas": {"General": STATUS_BLOCKED},
-                    "sector_counts": {},
-                    "seat_counts": {},
-                    "purchase_signals": {},
-                }
+        blocked = page_block_reason(page)
+        if blocked:
+            return {
+                "status": STATUS_BLOCKED,
+                "snippet": blocked,
+                "fechas": {"General": STATUS_BLOCKED},
+                "sector_counts": {},
+                "seat_counts": {},
+                "purchase_signals": {},
+            }
 
-            calendar_dates = page.query_selector_all("button.dia-evento")
-            rows = page.query_selector_all("div.shows-listado div.show")
-            event_rows = page.query_selector_all("div.evento-row")
+        calendar_dates = page.query_selector_all("button.dia-evento")
+        rows = page.query_selector_all("div.shows-listado div.show")
+        event_rows = page.query_selector_all("div.evento-row")
 
-            if calendar_dates:
-                month = _get_mes_texto(page)
-                labels = []
-                for index, date_button in enumerate(calendar_dates):
-                    try:
-                        day = date_button.query_selector("p")
-                        day_text = day.inner_text().strip() if day else str(index + 1)
-                    except Exception:
-                        day_text = str(index + 1)
-                    labels.append(f"{day_text} de {month}".strip())
+        if calendar_dates:
+            month = _get_mes_texto(page)
+            labels = []
+            for index, date_button in enumerate(calendar_dates):
+                try:
+                    day = date_button.query_selector("p")
+                    day_text = day.inner_text().strip() if day else str(index + 1)
+                except Exception:
+                    day_text = str(index + 1)
+                labels.append(f"{day_text} de {month}".strip())
 
-                for index, label in enumerate(labels):
-                    try:
-                        enter_status = _enter_calendar_map(page, url, index)
-                        purchase_signals[label] = enter_status in (
-                            "entered",
-                            MOVISTAR_PURCHASE_SIGNAL_FAILED,
-                        )
-                        if enter_status != "entered":
-                            fechas_estado[label] = (
-                                STATUS_UNKNOWN
-                                if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED
-                                else enter_status
-                            )
-                            sector_counts[label] = 0
-                            seat_counts[label] = 0
-                            if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED:
-                                evidence_by_date[label] = [
-                                    "Comprar/Seleccionar visible; el mapa no abrió"
-                                ]
-                            continue
+            _process_movistar_labels(
+                page, url, labels, _enter_calendar_map,
+                fechas_estado, sector_counts, seat_counts,
+                evidence_by_date, purchase_signals,
+            )
 
-                        inspect = _inspect_movistar_map(
-                            page,
-                            lambda idx=index: _new_map_page(
-                                page.context,
-                                lambda extra: _enter_calendar_map(extra, url, idx),
-                            ),
-                        )
-                        fechas_estado[label] = inspect["status"]
-                        sector_counts[label] = inspect["candidate_count"]
-                        seat_counts[label] = inspect["seat_count"]
-                        evidence_by_date[label] = inspect["evidence"]
-                        logging.info(
-                            "[Movistar-Profundo] %s: %s | sectores=%s | "
-                            "inventario=%s | evidencia=%s",
-                            label,
-                            inspect["status"],
-                            inspect["candidate_count"],
-                            inspect["seat_count"],
-                            inspect["evidence"][:5],
-                        )
-                    except Exception as exc:
-                        logging.exception(
-                            "[Movistar-Profundo] Error verificando %s", label
-                        )
-                        purchase_signals.setdefault(label, False)
-                        fechas_estado[label] = STATUS_UNKNOWN
-                        evidence_by_date[label] = [str(exc)]
-
-            elif rows:
-                labels = [
-                    _movistar_row_label(row, index)
-                    for index, row in enumerate(rows)
-                ]
-
-                for index, label in enumerate(labels):
-                    try:
-                        enter_status = _enter_list_map(page, url, index)
-                        purchase_signals[label] = enter_status in (
-                            "entered",
-                            MOVISTAR_PURCHASE_SIGNAL_FAILED,
-                        )
-                        if enter_status != "entered":
-                            fechas_estado[label] = (
-                                STATUS_UNKNOWN
-                                if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED
-                                else enter_status
-                            )
-                            sector_counts[label] = 0
-                            seat_counts[label] = 0
-                            if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED:
-                                evidence_by_date[label] = [
-                                    "Comprar/Seleccionar visible; el mapa no abrió"
-                                ]
-                            continue
-
-                        inspect = _inspect_movistar_map(
-                            page,
-                            lambda idx=index: _new_map_page(
-                                page.context,
-                                lambda extra: _enter_list_map(extra, url, idx),
-                            ),
-                        )
-                        fechas_estado[label] = inspect["status"]
-                        sector_counts[label] = inspect["candidate_count"]
-                        seat_counts[label] = inspect["seat_count"]
-                        evidence_by_date[label] = inspect["evidence"]
-                        logging.info(
-                            "[Movistar-Profundo] %s: %s | sectores=%s | "
-                            "inventario=%s | evidencia=%s",
-                            label,
-                            inspect["status"],
-                            inspect["candidate_count"],
-                            inspect["seat_count"],
-                            inspect["evidence"][:5],
-                        )
-                    except Exception as exc:
-                        logging.exception(
-                            "[Movistar-Profundo] Error verificando %s", label
-                        )
-                        purchase_signals.setdefault(label, False)
-                        fechas_estado[label] = STATUS_UNKNOWN
-                        evidence_by_date[label] = [str(exc)]
-            elif event_rows:
-                labels = [
-                    _movistar_row_label(row, index)
-                    for index, row in enumerate(event_rows)
-                ]
-
-                for index, label in enumerate(labels):
-                    try:
-                        enter_status = _enter_event_row_map(page, url, index)
-                        purchase_signals[label] = enter_status in (
-                            "entered",
-                            MOVISTAR_PURCHASE_SIGNAL_FAILED,
-                        )
-                        if enter_status != "entered":
-                            fechas_estado[label] = (
-                                STATUS_UNKNOWN
-                                if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED
-                                else enter_status
-                            )
-                            sector_counts[label] = 0
-                            seat_counts[label] = 0
-                            if enter_status == MOVISTAR_PURCHASE_SIGNAL_FAILED:
-                                evidence_by_date[label] = [
-                                    "Comprar/Seleccionar visible; el mapa no abrió"
-                                ]
-                            continue
-
-                        inspect = _inspect_movistar_map(
-                            page,
-                            lambda idx=index: _new_map_page(
-                                page.context,
-                                lambda extra: _enter_event_row_map(
-                                    extra,
-                                    url,
-                                    idx,
-                                ),
-                            ),
-                        )
-                        fechas_estado[label] = inspect["status"]
-                        sector_counts[label] = inspect["candidate_count"]
-                        seat_counts[label] = inspect["seat_count"]
-                        evidence_by_date[label] = inspect["evidence"]
-                        logging.info(
-                            "[Movistar-Profundo] %s: %s | sectores=%s | "
-                            "inventario=%s | evidencia=%s",
-                            label,
-                            inspect["status"],
-                            inspect["candidate_count"],
-                            inspect["seat_count"],
-                            inspect["evidence"][:5],
-                        )
-                    except Exception as exc:
-                        logging.exception(
-                            "[Movistar-Profundo] Error verificando %s", label
-                        )
-                        purchase_signals.setdefault(label, False)
-                        fechas_estado[label] = STATUS_UNKNOWN
-                        evidence_by_date[label] = [str(exc)]
-            else:
-                fechas_estado["General"] = STATUS_UNKNOWN
-                evidence_by_date["General"] = [
-                    "No apareció calendario ni listado de funciones conocido"
-                ]
-                purchase_signals["General"] = False
-        finally:
-            browser.close()
-            logging.info("[Movistar-Profundo] Browser cerrado")
+        elif rows:
+            labels = [
+                _movistar_row_label(row, index)
+                for index, row in enumerate(rows)
+            ]
+            _process_movistar_labels(
+                page, url, labels, _enter_list_map,
+                fechas_estado, sector_counts, seat_counts,
+                evidence_by_date, purchase_signals,
+            )
+        elif event_rows:
+            labels = [
+                _movistar_row_label(row, index)
+                for index, row in enumerate(event_rows)
+            ]
+            _process_movistar_labels(
+                page, url, labels, _enter_event_row_map,
+                fechas_estado, sector_counts, seat_counts,
+                evidence_by_date, purchase_signals,
+            )
+        else:
+            fechas_estado["General"] = STATUS_UNKNOWN
+            evidence_by_date["General"] = [
+                "No apareció calendario ni listado de funciones conocido"
+            ]
+            purchase_signals["General"] = False
 
     status = aggregate_status(fechas_estado)
     snippets = {
@@ -1200,71 +1142,65 @@ def _allaccess_show_item_status(item, signal: str) -> str:
 
 def _check_allaccess(url: str) -> dict:
     logging.info(f"[AllAccess] Iniciando chequeo: {url}")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
+    fechas_estado = {}
+    with _browser_page("AllAccess") as page:
+        logging.info("[AllAccess] Navegando a la página...")
+        page.goto(url, timeout=30000)
+        _wait_after_navigation(page)
+        logging.info("[AllAccess] Página cargada")
+
+        blocked = page_block_reason(page)
+        if blocked:
+            return {
+                "status": STATUS_BLOCKED,
+                "snippet": blocked,
+                "fechas": {"General": STATUS_BLOCKED},
+            }
+
+        global_status = _allaccess_global_status(page)
+        if global_status:
+            return {
+                "status": global_status,
+                "snippet": "agotado global confirmado",
+                "fechas": {"General": global_status},
+            }
+
         try:
-            page = browser.new_page()
-            logging.info("[AllAccess] Navegando a la página...")
-            page.goto(url, timeout=30000)
-            _wait_after_navigation(page)
-            logging.info("[AllAccess] Página cargada")
+            page.click("div.dropdown", timeout=5000)
+            page.wait_for_timeout(1000)
+            logging.info("[AllAccess] Dropdown abierto")
+        except Exception:
+            logging.info("[AllAccess] Sin dropdown, continuando")
 
-            fechas_estado = {}
-            blocked = page_block_reason(page)
-            if blocked:
-                return {
-                    "status": STATUS_BLOCKED,
-                    "snippet": blocked,
-                    "fechas": {"General": STATUS_BLOCKED},
-                }
+        items = page.query_selector_all("ul#show-dropdown li")
+        logging.info(f"[AllAccess] Fechas encontradas: {len(items)}")
 
-            global_status = _allaccess_global_status(page)
-            if global_status:
-                return {
-                    "status": global_status,
-                    "snippet": "agotado global confirmado",
-                    "fechas": {"General": global_status},
-                }
-
+        for item in items:
             try:
-                page.click("div.dropdown", timeout=5000)
-                page.wait_for_timeout(1000)
-                logging.info("[AllAccess] Dropdown abierto")
-            except Exception:
-                logging.info("[AllAccess] Sin dropdown, continuando")
-
-            items = page.query_selector_all("ul#show-dropdown li")
-            logging.info(f"[AllAccess] Fechas encontradas: {len(items)}")
-
-            for item in items:
-                try:
-                    clase = item.get_attribute("class") or ""
-                    texto_el = item.query_selector("div")
-                    texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
-                    fecha_label = texto.split("\n")[0].strip()
-                    if not fecha_label:
-                        continue
-                    signal = f"{clase} {texto}".lower()
-                    # El listado es una señal rápida, no prueba de inventario final.
-                    fechas_estado[fecha_label] = _allaccess_show_item_status(
-                        item,
-                        signal,
-                    )
-                    logging.info(f"[AllAccess] {fecha_label}: {fechas_estado[fecha_label]}")
-                except Exception as ex:
-                    logging.warning(f"[AllAccess] Error leyendo item: {ex}")
+                clase = item.get_attribute("class") or ""
+                texto_el = item.query_selector("div")
+                texto = texto_el.inner_text().strip() if texto_el else item.inner_text().strip()
+                fecha_label = texto.split("\n")[0].strip()
+                if not fecha_label:
                     continue
-
-            # Respaldo para páginas de una sola función que publican el botón
-            # directo sin construir el desplegable.
-            if not fechas_estado and _visible_element(page, "#buyButton"):
-                fechas_estado["General"] = STATUS_CANDIDATE
-                logging.info(
-                    "[AllAccess] Botón Ver entradas habilitado sin dropdown"
+                signal = f"{clase} {texto}".lower()
+                # El listado es una señal rápida, no prueba de inventario final.
+                fechas_estado[fecha_label] = _allaccess_show_item_status(
+                    item,
+                    signal,
                 )
-        finally:
-            browser.close()
-            logging.info("[AllAccess] Browser cerrado")
+                logging.info(f"[AllAccess] {fecha_label}: {fechas_estado[fecha_label]}")
+            except Exception as ex:
+                logging.warning(f"[AllAccess] Error leyendo item: {ex}")
+                continue
+
+        # Respaldo para páginas de una sola función que publican el botón
+        # directo sin construir el desplegable.
+        if not fechas_estado and _visible_element(page, "#buyButton"):
+            fechas_estado["General"] = STATUS_CANDIDATE
+            logging.info(
+                "[AllAccess] Botón Ver entradas habilitado sin dropdown"
+            )
 
     if not fechas_estado:
         fechas_estado["General"] = STATUS_UNKNOWN
@@ -1338,24 +1274,16 @@ def _check_bts(url: str) -> dict:
     logging.info("[BTS] Iniciando chequeo de %s fecha(s)", len(urls_to_check))
     fechas_estado = {}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
-        try:
-            page = browser.new_page()
-
-            for fecha_url in urls_to_check:
-                fecha_label = fecha_url.split("/event/bts-")[-1].replace("-", " ").title()
-                try:
-                    estado = _check_bts_fecha(page, fecha_url)
-                    fechas_estado[fecha_label] = estado
-                    logging.info(f"[BTS] {fecha_label}: {estado}")
-                except Exception as ex:
-                    logging.warning(f"[BTS] Error en {fecha_label}: {ex}")
-                    fechas_estado[fecha_label] = STATUS_UNKNOWN
-
-        finally:
-            browser.close()
-            logging.info("[BTS] Browser cerrado")
+    with _browser_page("BTS") as page:
+        for fecha_url in urls_to_check:
+            fecha_label = fecha_url.split("/event/bts-")[-1].replace("-", " ").title()
+            try:
+                estado = _check_bts_fecha(page, fecha_url)
+                fechas_estado[fecha_label] = estado
+                logging.info(f"[BTS] {fecha_label}: {estado}")
+            except Exception as ex:
+                logging.warning(f"[BTS] Error en {fecha_label}: {ex}")
+                fechas_estado[fecha_label] = STATUS_UNKNOWN
 
     status = aggregate_status(fechas_estado)
     return {
@@ -1375,65 +1303,59 @@ def _check_bts(url: str) -> dict:
 
 def _check_enigmatickets(url: str) -> dict:
     logging.info(f"[Enigma] Iniciando chequeo: {url}")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=CHROME_ARGS)
-        try:
-            page = browser.new_page()
-            logging.info("[Enigma] Navegando a la página...")
-            page.goto(url, timeout=30000)
-            _wait_after_navigation(page)
-            logging.info("[Enigma] Página cargada")
+    fechas_estado = {}
+    with _browser_page("Enigma") as page:
+        logging.info("[Enigma] Navegando a la página...")
+        page.goto(url, timeout=30000)
+        _wait_after_navigation(page)
+        logging.info("[Enigma] Página cargada")
 
-            fechas_estado = {}
-            blocked = page_block_reason(page)
-            if blocked:
-                return {
-                    "status": STATUS_BLOCKED,
-                    "snippet": blocked,
-                    "fechas": {"General": STATUS_BLOCKED},
-                }
+        blocked = page_block_reason(page)
+        if blocked:
+            return {
+                "status": STATUS_BLOCKED,
+                "snippet": blocked,
+                "fechas": {"General": STATUS_BLOCKED},
+            }
 
-            filas = page.query_selector_all("div.flex.h-\\[40px\\].items-center.pl-3.pr-3.justify-between")
-            logging.info(f"[Enigma] Fases encontradas: {len(filas)}")
+        filas = page.query_selector_all("div.flex.h-\\[40px\\].items-center.pl-3.pr-3.justify-between")
+        logging.info(f"[Enigma] Fases encontradas: {len(filas)}")
 
-            for fila in filas:
-                try:
-                    nombre_el = fila.query_selector("span.truncate")
-                    nombre = nombre_el.inner_text().strip() if nombre_el else "Fase desconocida"
+        for fila in filas:
+            try:
+                nombre_el = fila.query_selector("span.truncate")
+                nombre = nombre_el.inner_text().strip() if nombre_el else "Fase desconocida"
 
-                    estado_el = fila.query_selector("span[data-testid='text-component']")
-                    estado_texto = estado_el.inner_text().strip().lower() if estado_el else ""
+                estado_el = fila.query_selector("span[data-testid='text-component']")
+                estado_texto = estado_el.inner_text().strip().lower() if estado_el else ""
 
-                    btn_div = fila.query_selector("div.flex.justify-end div")
-                    clases = btn_div.get_attribute("class") if btn_div else ""
+                btn_div = fila.query_selector("div.flex.justify-end div")
+                clases = btn_div.get_attribute("class") if btn_div else ""
 
-                    logging.info(f"[Enigma] [{nombre}]: '{estado_texto}' | clases: {clases}")
+                logging.info(f"[Enigma] [{nombre}]: '{estado_texto}' | clases: {clases}")
 
-                    if "agotado" in estado_texto or "sold out" in estado_texto or "bg-red" in clases:
-                        fechas_estado[nombre] = STATUS_SOLD_OUT
-                    elif any(kw in estado_texto for kw in ["comprar", "disponible", "compra", "buy"]):
-                        fechas_estado[nombre] = STATUS_CANDIDATE
-                    else:
-                        fechas_estado[nombre] = STATUS_UNKNOWN
+                if "agotado" in estado_texto or "sold out" in estado_texto or "bg-red" in clases:
+                    fechas_estado[nombre] = STATUS_SOLD_OUT
+                elif any(kw in estado_texto for kw in ["comprar", "disponible", "compra", "buy"]):
+                    fechas_estado[nombre] = STATUS_CANDIDATE
+                else:
+                    fechas_estado[nombre] = STATUS_UNKNOWN
 
-                except Exception as ex:
-                    logging.warning(f"[Enigma] Error leyendo fila: {ex}")
-                    continue
+            except Exception as ex:
+                logging.warning(f"[Enigma] Error leyendo fila: {ex}")
+                continue
 
-            if not fechas_estado:
-                logging.info("[Enigma] Sin filas, usando fallback con spans")
-                todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
-                for span in todos_los_spans:
-                    texto = span.inner_text().strip().lower()
-                    if "agotado" in texto or "sold out" in texto:
-                        fechas_estado["General"] = STATUS_SOLD_OUT
-                        break
-                    elif any(kw in texto for kw in ["comprar", "disponible", "buy"]):
-                        fechas_estado["General"] = STATUS_CANDIDATE
-                        break
-        finally:
-            browser.close()
-            logging.info("[Enigma] Browser cerrado")
+        if not fechas_estado:
+            logging.info("[Enigma] Sin filas, usando fallback con spans")
+            todos_los_spans = page.query_selector_all("span[data-testid='text-component']")
+            for span in todos_los_spans:
+                texto = span.inner_text().strip().lower()
+                if "agotado" in texto or "sold out" in texto:
+                    fechas_estado["General"] = STATUS_SOLD_OUT
+                    break
+                elif any(kw in texto for kw in ["comprar", "disponible", "buy"]):
+                    fechas_estado["General"] = STATUS_CANDIDATE
+                    break
 
     if not fechas_estado:
         fechas_estado["General"] = STATUS_UNKNOWN
