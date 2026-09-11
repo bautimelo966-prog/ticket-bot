@@ -1514,20 +1514,24 @@ def _clasificar_fila_simple(root, label: str, fechas_estado: dict, purchase_sign
 
 def _check_movistar_simple(url: str) -> dict:
     """
-    Chequeo liviano: una sola carga de página pública, sin loguearse ni
-    abrir el mapa de asientos. Solo mira si el botón de cada fecha dice
-    "Comprar"/"Seleccionar" (señal de compra) o "Agotado" (explícito).
+    Chequeo liviano: se loguea (algunas URLs, como /Ticketera/..., redirigen
+    directo al login y no muestran nada sin sesión) pero NO abre el mapa de
+    asientos. Solo mira si el botón de cada fecha dice "Comprar"/"Seleccionar"
+    (señal de compra) o "Agotado" (explícito).
 
     No confirma un asiento real -- eso es lo que hacía fallar al chequeo
-    profundo por depender de una sesión logueada que no persiste entre
-    recargas. Para eventos puntuales que necesiten esa confirmación extra,
-    está el modo profundo (opt-in con /profundo).
+    profundo por depender de repetidas recargas logueadas para abrir el
+    mapa. Acá solo se recarga una vez por fecha en el peor caso (formato
+    calendario), no una vez por fecha Y otra vez para abrir su mapa. Para
+    eventos puntuales que necesiten la confirmación de asiento real, está
+    el modo profundo (opt-in con /profundo).
     """
     logging.info("[Movistar-Simple] Iniciando chequeo: %s", url)
     fechas_estado = {}
     purchase_signals = {}
 
     with _browser_page("Movistar-Simple") as page:
+        _login_movistar(page)
         page.goto(url, timeout=30000)
         _wait_after_navigation(page)
 
@@ -1571,6 +1575,12 @@ def _check_movistar_simple(url: str) -> dict:
                 try:
                     page.goto(url, timeout=30000)
                     _wait_after_navigation(page)
+                    if not _wait_for_movistar_session(page):
+                        logging.warning(
+                            "[Movistar-Simple] La sesión no se confirmó tras "
+                            "recargar para %s.",
+                            label,
+                        )
                     dates_fresh = _wait_for_index(page, "button.dia-evento", index)
                     if index >= len(dates_fresh):
                         fechas_estado[label] = STATUS_UNKNOWN
