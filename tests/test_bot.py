@@ -432,7 +432,7 @@ class AlertDeliveryTests(unittest.TestCase):
                 with patch.object(bot.time, "time", return_value=1030):
                     bot.run_check(urls)
 
-        checker.assert_called_once_with(url)
+        checker.assert_called_once_with(url, False)
         self.assertEqual(urls[url]["consecutive_failures"], 0)
         self.assertEqual(urls[url]["next_retry_at"], 0)
 
