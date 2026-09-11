@@ -467,36 +467,10 @@ def _login_movistar(page):
 
     # La redirección sola no prueba que el login haya funcionado -- un login
     # fallido (credenciales vencidas, etc.) también puede terminar en una URL
-    # que matchea ese patrón tan amplio. Se confirma chequeando que el sitio
-    # ya no muestre el cartel de "iniciá sesión" de un visitante anónimo.
-    def _sesion_confirmada() -> bool:
-        try:
-            text = page.locator("body").inner_text(timeout=5000).lower()
-        except Exception:
-            return False
-        return "iniciá sesión o creá tu cuenta" not in text
-
-    if not _sesion_confirmada():
-        # Confirmado probando el flujo a mano: después del primer login el
-        # sitio a veces se queda mostrando "Iniciar sesión" en el header
-        # hasta hacer un segundo click ahí -- recién ese segundo click
-        # termina de reconocer la sesión que ya quedó autenticada.
-        logging.info(
-            "[Movistar] Sesión no confirmada tras el primer login; "
-            "probando el segundo click en 'Iniciar sesión' del header..."
-        )
-        try:
-            page.click('text="Iniciar sesión"', timeout=5000)
-            page.wait_for_timeout(1500)
-            _wait_after_navigation(page)
-        except Exception as exc:
-            logging.warning(
-                "[Movistar] No se pudo hacer el segundo click en "
-                "'Iniciar sesión': %s",
-                exc,
-            )
-
-    if not _sesion_confirmada():
+    # que matchea ese patrón tan amplio. _wait_for_movistar_session confirma
+    # de verdad (y reintenta el segundo click en "Iniciar sesión" si hace
+    # falta, algo confirmado a mano: a veces el sitio lo pide).
+    if not _wait_for_movistar_session(page):
         _log_post_click_state(page, "login fallido")
         raise Exception(
             "El login no se confirmó ni con el segundo click en 'Iniciar "
@@ -990,19 +964,35 @@ def _wait_for_movistar_session(page, attempts: int = 8, wait_ms: int = 1000) -> 
     El shell inicial de esta app (antes de que termine de verificar la
     sesión contra el server) siempre arranca mostrando el menú de "Iniciar
     sesión" de un visitante anónimo. Cada vez que el bot vuelve a cargar la
-    página del evento (una vez por fecha), corre el riesgo de leerla en ese
-    estado transitorio y confundirlo con una sesión realmente perdida.
-    Devuelve False si después de esperar sigue sin confirmarse.
+    página del evento (una vez por fecha, o en el login inicial), corre el
+    riesgo de leerla en ese estado transitorio y confundirlo con una sesión
+    realmente perdida. Devuelve False si después de esperar sigue sin
+    confirmarse.
     """
-    for _ in range(attempts):
+    def _confirmada() -> bool:
         try:
             body_text = page.locator("body").inner_text(timeout=3000).lower()
         except Exception:
-            body_text = ""
-        if "iniciá sesión o creá tu cuenta" not in body_text:
+            return False
+        return "iniciá sesión o creá tu cuenta" not in body_text
+
+    intento_click_hecho = False
+    for _ in range(attempts):
+        if _confirmada():
             return True
+        if not intento_click_hecho:
+            # Confirmado a mano: a veces el sitio necesita un segundo click
+            # en "Iniciar sesión" del header para terminar de reconocer una
+            # sesión que en realidad ya está autenticada.
+            intento_click_hecho = True
+            try:
+                page.click('text="Iniciar sesión"', timeout=3000)
+                page.wait_for_timeout(1000)
+                continue
+            except Exception:
+                pass
         page.wait_for_timeout(wait_ms)
-    return False
+    return _confirmada()
 
 
 def _enter_calendar_map(page, url: str, date_index: int) -> str:
