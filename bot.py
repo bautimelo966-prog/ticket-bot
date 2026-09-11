@@ -961,11 +961,37 @@ def _log_post_click_state(page, label: str):
     )
 
 
+def _wait_for_movistar_session(page, attempts: int = 8, wait_ms: int = 1000) -> bool:
+    """Espera a que la página confirme la sesión logueada tras recargar.
+
+    El shell inicial de esta app (antes de que termine de verificar la
+    sesión contra el server) siempre arranca mostrando el menú de "Iniciar
+    sesión" de un visitante anónimo. Cada vez que el bot vuelve a cargar la
+    página del evento (una vez por fecha), corre el riesgo de leerla en ese
+    estado transitorio y confundirlo con una sesión realmente perdida.
+    Devuelve False si después de esperar sigue sin confirmarse.
+    """
+    for _ in range(attempts):
+        try:
+            body_text = page.locator("body").inner_text(timeout=3000).lower()
+        except Exception:
+            body_text = ""
+        if "iniciá sesión o creá tu cuenta" not in body_text:
+            return True
+        page.wait_for_timeout(wait_ms)
+    return False
+
+
 def _enter_calendar_map(page, url: str, date_index: int) -> str:
     page.goto(url, timeout=30000)
     _wait_after_navigation(page)
     if page_block_reason(page):
         return STATUS_BLOCKED
+    if not _wait_for_movistar_session(page):
+        logging.warning(
+            "[Movistar-Profundo] La sesión no se confirmó tras recargar "
+            "(sigue mostrando 'Iniciar sesión')."
+        )
     page.wait_for_selector("button.dia-evento", timeout=15000)
     dates = _wait_for_index(page, "button.dia-evento", date_index)
     if date_index >= len(dates):
@@ -994,6 +1020,11 @@ def _enter_row_map(page, url: str, row_index: int, selector: str) -> str:
     _wait_after_navigation(page)
     if page_block_reason(page):
         return STATUS_BLOCKED
+    if not _wait_for_movistar_session(page):
+        logging.warning(
+            "[Movistar-Profundo] La sesión no se confirmó tras recargar "
+            "(sigue mostrando 'Iniciar sesión')."
+        )
     rows = _wait_for_index(page, selector, row_index)
     if row_index >= len(rows):
         raise IndexError(f"Fila {row_index} fuera de rango")
