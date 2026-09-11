@@ -469,15 +469,38 @@ def _login_movistar(page):
     # fallido (credenciales vencidas, etc.) también puede terminar en una URL
     # que matchea ese patrón tan amplio. Se confirma chequeando que el sitio
     # ya no muestre el cartel de "iniciá sesión" de un visitante anónimo.
-    try:
-        body_text = page.locator("body").inner_text(timeout=5000).lower()
-    except Exception:
-        body_text = ""
-    if "iniciá sesión o creá tu cuenta" in body_text or "iniciar sesión" in body_text:
+    def _sesion_confirmada() -> bool:
+        try:
+            text = page.locator("body").inner_text(timeout=5000).lower()
+        except Exception:
+            return False
+        return "iniciá sesión o creá tu cuenta" not in text
+
+    if not _sesion_confirmada():
+        # Confirmado probando el flujo a mano: después del primer login el
+        # sitio a veces se queda mostrando "Iniciar sesión" en el header
+        # hasta hacer un segundo click ahí -- recién ese segundo click
+        # termina de reconocer la sesión que ya quedó autenticada.
+        logging.info(
+            "[Movistar] Sesión no confirmada tras el primer login; "
+            "probando el segundo click en 'Iniciar sesión' del header..."
+        )
+        try:
+            page.click('text="Iniciar sesión"', timeout=5000)
+            page.wait_for_timeout(1500)
+            _wait_after_navigation(page)
+        except Exception as exc:
+            logging.warning(
+                "[Movistar] No se pudo hacer el segundo click en "
+                "'Iniciar sesión': %s",
+                exc,
+            )
+
+    if not _sesion_confirmada():
         _log_post_click_state(page, "login fallido")
         raise Exception(
-            "El login no se confirmó: el sitio sigue mostrando 'Iniciar sesión' "
-            "después de intentar loguearse (¿credenciales vencidas o inválidas?)."
+            "El login no se confirmó ni con el segundo click en 'Iniciar "
+            "sesión' (¿credenciales vencidas o inválidas?)."
         )
     logging.info("[Movistar] Login exitoso")
 
