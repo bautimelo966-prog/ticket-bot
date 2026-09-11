@@ -352,6 +352,8 @@ def _worker(fn_name: str, url: str, result_queue: multiprocessing.Queue, env: di
             result = _check_enigmatickets(url)
         elif fn_name == "movistar_profundo":
             result = _check_movistar_profundo(url)
+        elif fn_name == "movistar_simple":
+            result = _check_movistar_simple(url)
         else:
             result = {
                 "status": STATUS_ERROR,
@@ -1493,6 +1495,95 @@ def _check_enigmatickets(url: str) -> dict:
 
 
 # ─────────────────────────────────────────────
+# Checker simple Movistar Arena (por defecto)
+# ─────────────────────────────────────────────
+
+def _clasificar_fila_simple(root, label: str, fechas_estado: dict, purchase_signals: dict):
+    """Clasifica una fila/fecha sin clickear nada, solo leyendo su botón."""
+    try:
+        button = _find_movistar_purchase_button(root)
+    except Exception:
+        button = None
+    if button:
+        fechas_estado[label] = STATUS_CANDIDATE
+        purchase_signals[label] = True
+        return
+    fechas_estado[label] = (
+        STATUS_SOLD_OUT if _has_explicit_sold_out(root) else STATUS_UNKNOWN
+    )
+    purchase_signals[label] = False
+
+
+def _check_movistar_simple(url: str) -> dict:
+    """
+    Chequeo liviano: una sola carga de página pública, sin loguearse ni
+    abrir el mapa de asientos. Solo mira si el botón de cada fecha dice
+    "Comprar"/"Seleccionar" (señal de compra) o "Agotado" (explícito).
+
+    No confirma un asiento real -- eso es lo que hacía fallar al chequeo
+    profundo por depender de una sesión logueada que no persiste entre
+    recargas. Para eventos puntuales que necesiten esa confirmación extra,
+    está el modo profundo (opt-in con /profundo).
+    """
+    logging.info("[Movistar-Simple] Iniciando chequeo: %s", url)
+    fechas_estado = {}
+    purchase_signals = {}
+
+    with _browser_page("Movistar-Simple") as page:
+        page.goto(url, timeout=30000)
+        _wait_after_navigation(page)
+
+        blocked = page_block_reason(page)
+        if blocked:
+            return {
+                "status": STATUS_BLOCKED,
+                "snippet": blocked,
+                "fechas": {"General": STATUS_BLOCKED},
+                "purchase_signals": {},
+            }
+
+        calendar_dates = page.query_selector_all("button.dia-evento")
+        rows = page.query_selector_all("div.shows-listado div.show")
+        event_rows = page.query_selector_all("div.evento-row")
+
+        if rows:
+            for index, row in enumerate(rows):
+                label = _movistar_row_label(row, index)
+                _clasificar_fila_simple(row, label, fechas_estado, purchase_signals)
+        elif event_rows:
+            for index, row in enumerate(event_rows):
+                label = _movistar_row_label(row, index)
+                _clasificar_fila_simple(row, label, fechas_estado, purchase_signals)
+        elif calendar_dates:
+            # El formato calendario no publica el estado por día sin
+            # clickear -- no lo soporta el modo simple. Activá /profundo
+            # para este evento si usa este formato.
+            fechas_estado["General"] = STATUS_UNKNOWN
+            purchase_signals["General"] = False
+            logging.info(
+                "[Movistar-Simple] Formato calendario detectado; "
+                "no soportado en modo simple."
+            )
+        else:
+            fechas_estado["General"] = STATUS_UNKNOWN
+            purchase_signals["General"] = False
+
+    if not fechas_estado:
+        fechas_estado["General"] = STATUS_UNKNOWN
+    status = aggregate_status(fechas_estado)
+    return {
+        "status": status,
+        "snippet": (
+            "apareció Comprar/Seleccionar; falta confirmar asiento (chequeo simple)"
+            if status == STATUS_CANDIDATE
+            else status
+        ),
+        "fechas": fechas_estado,
+        "purchase_signals": purchase_signals,
+    }
+
+
+# ─────────────────────────────────────────────
 # Checkers públicos
 # ─────────────────────────────────────────────
 
@@ -1508,14 +1599,19 @@ def check_enigmatickets(url: str) -> dict:
 def check_movistar_profundo(url: str) -> dict:
     return run_with_timeout("movistar_profundo", url)
 
-def check_url(url: str) -> dict:
+def check_movistar_simple(url: str) -> dict:
+    return run_with_timeout("movistar_simple", url)
+
+def check_url(url: str, deep: bool = False) -> dict:
     normalized = normalize_url(url)
     parts = urlsplit(normalized)
     host = parts.netloc
     path = parts.path.lower()
 
     if host.endswith("movistararena.com.ar"):
-        return check_movistar_profundo(normalized)
+        if deep:
+            return check_movistar_profundo(normalized)
+        return check_movistar_simple(normalized)
     if host.endswith("allaccess.com.ar") and path.startswith("/event/bts"):
         return check_bts(normalized)
     if host.endswith("allaccess.com.ar"):
@@ -1602,6 +1698,7 @@ def handle_command(text: str, urls: dict) -> str:
             "next_retry_at": 0,
             "health_alert_active": False,
             "purchase_signals": {},
+            "deep_check": False,
             "added": datetime.now().isoformat()
         }
         save_urls(urls)
@@ -1634,8 +1731,9 @@ def handle_command(text: str, urls: dict) -> str:
                 STATUS_BLOCKED:   "🛑",
                 STATUS_ERROR:     "⚠️",
             }.get(data.get("last_status"), "⚪")
+            profundo = " 🔬" if data.get("deep_check") else ""
             lines.append(
-                f"{i}. {status_emoji} <b>{escape(str(data['name']))}</b>\n"
+                f"{i}. {status_emoji} <b>{escape(str(data['name']))}</b>{profundo}\n"
                 f"   <a href='{escape(url, quote=True)}'>{escape(url[:60])}...</a>"
             )
         return "\n".join(lines)
@@ -1675,6 +1773,30 @@ def handle_command(text: str, urls: dict) -> str:
             return "📋 No tenés URLs en monitoreo."
         return "__force_check__"
 
+    elif cmd == "/profundo":
+        if len(parts) < 2:
+            return (
+                "⚠️ Uso correcto:\n<code>/profundo URL on</code> o "
+                "<code>/profundo URL off</code>\n\n"
+                "Por defecto los eventos de Movistar usan el chequeo simple "
+                "(solo mira si aparece Comprar/Seleccionar). Activá el "
+                "profundo para una fecha puntual si el simple te da "
+                "señales que después no se confirman."
+            )
+        args = parts[2].split() if len(parts) > 2 else []
+        url = normalize_url(parts[1])
+        if url not in urls:
+            return "⚠️ No encontré esa URL en la lista."
+        if "movistararena.com.ar" not in url:
+            return "⚠️ El chequeo profundo solo aplica a eventos de Movistar Arena."
+        activar = args[0].lower() if args else "on"
+        if activar not in ("on", "off"):
+            return "⚠️ Usá <code>on</code> u <code>off</code>."
+        urls[url]["deep_check"] = activar == "on"
+        save_urls(urls)
+        estado = "activado" if activar == "on" else "desactivado"
+        return f"🔧 Chequeo profundo {estado} para <b>{escape(str(urls[url]['name']))}</b>."
+
     elif cmd in ("/help", "/start"):
         return (
             "🎫 <b>Bot de Entradas</b>\n\n"
@@ -1684,9 +1806,13 @@ def handle_command(text: str, urls: dict) -> str:
             "/list — Ver todas las URLs activas\n"
             "/check — Forzar chequeo ahora mismo\n"
             "/status — Ver el último resultado y hora por evento\n"
+            "/profundo URL on|off — Activar/desactivar la verificación "
+            "de asiento real para un evento de Movistar puntual\n"
             "/help — Ver esta ayuda\n\n"
             "AllAccess y Enigma: cada 5 minutos\n"
-            "Movistar Arena: cada 10 minutos"
+            "Movistar Arena: cada 10 minutos\n\n"
+            "Movistar Arena por defecto usa el chequeo simple (avisa "
+            "apenas aparece Comprar/Seleccionar, sin confirmar asiento)."
         )
 
     return f"❓ Comando no reconocido: {cmd}\nEscribí /help para ver los comandos."
@@ -1720,7 +1846,10 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
     results = {}
     workers = max(1, min(MAX_CONCURRENT_CHECKS, len(urls_to_check)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(check_url, url): url for url in urls_to_check}
+        futures = {
+            executor.submit(check_url, url, urls[url].get("deep_check", False)): url
+            for url in urls_to_check
+        }
         for future in as_completed(futures):
             checked_url = futures[future]
             try:
