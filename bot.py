@@ -1578,6 +1578,11 @@ def _check_movistar_simple(url: str) -> dict:
         ),
         "fechas": fechas_estado,
         "purchase_signals": purchase_signals,
+        # Marca el origen para que run_check redacte la alerta distinto: acá
+        # "candidate" significa que el sitio público ya muestra Comprar, una
+        # señal más fuerte que la del profundo (sector habilitado sin poder
+        # confirmar asiento), que sigue mereciendo el tono más cauteloso.
+        "checker": "movistar_simple",
     }
 
 
@@ -1945,17 +1950,32 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
             candidate_text = ", ".join(
                 escape(str(date)) for date in candidate_dates
             )
-            queue_alert(
-                data,
-                "candidate:" + "|".join(sorted(candidate_dates)),
-                (
+            if result.get("checker") == "movistar_simple":
+                # El chequeo simple solo llega a "candidate" cuando el sitio
+                # público ya muestra Comprar/Seleccionar en vez de Agotado --
+                # la misma señal que antes alcanzaba para conseguir entradas,
+                # así que acá sí se avisa con tono de urgencia.
+                candidate_msg = (
+                    "🚨 <b>¡HAY DISPONIBLE!</b>\n\n"
+                    f"🎫 <b>{escape(str(name))}</b>\n"
+                    f"🗓 <i>{candidate_text}</i>\n\n"
+                    "Apareció \"Comprar\"/\"Seleccionar\" donde antes decía "
+                    "Agotado.\n\n"
+                    f"👉 <a href='{escape(url, quote=True)}'>Comprá acá</a>"
+                )
+            else:
+                candidate_msg = (
                     "🟡 <b>POSIBLE LIBERACIÓN</b>\n\n"
                     f"🎫 <b>{escape(str(name))}</b>\n"
                     f"🗓 <i>{candidate_text}</i>\n\n"
                     "Apareció una señal de compra o un sector habilitado, "
                     "pero todavía no pude confirmar un asiento seleccionable.\n\n"
                     f"👉 <a href='{escape(url, quote=True)}'>Revisá ahora</a>"
-                ),
+                )
+            queue_alert(
+                data,
+                "candidate:" + "|".join(sorted(candidate_dates)),
+                candidate_msg,
             )
 
         previous_check = float(data.get("last_check", 0) or 0)
