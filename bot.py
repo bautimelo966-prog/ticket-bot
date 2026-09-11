@@ -459,6 +459,20 @@ def _login_movistar(page):
 
     logging.info("[Movistar] Paso 4: Esperando redirección...")
     page.wait_for_url("https://www.movistararena.com.ar/**", timeout=15000)
+
+    # La redirección sola no prueba que el login haya funcionado -- un login
+    # fallido (credenciales vencidas, etc.) también puede terminar en una URL
+    # que matchea ese patrón tan amplio. Se confirma chequeando que el sitio
+    # ya no muestre el cartel de "iniciá sesión" de un visitante anónimo.
+    try:
+        body_text = page.locator("body").inner_text(timeout=5000).lower()
+    except Exception:
+        body_text = ""
+    if "iniciá sesión o creá tu cuenta" in body_text or "iniciar sesión" in body_text:
+        raise Exception(
+            "El login no se confirmó: el sitio sigue mostrando 'Iniciar sesión' "
+            "después de intentar loguearse (¿credenciales vencidas o inválidas?)."
+        )
     logging.info("[Movistar] Login exitoso")
 
 def _get_mes_texto(page) -> str:
