@@ -1553,15 +1553,38 @@ def _check_movistar_simple(url: str) -> dict:
                 label = _movistar_row_label(row, index)
                 _clasificar_fila_simple(row, label, fechas_estado, purchase_signals)
         elif calendar_dates:
-            # El formato calendario no publica el estado por día sin
-            # clickear -- no lo soporta el modo simple. Activá /profundo
-            # para este evento si usa este formato.
-            fechas_estado["General"] = STATUS_UNKNOWN
-            purchase_signals["General"] = False
-            logging.info(
-                "[Movistar-Simple] Formato calendario detectado; "
-                "no soportado en modo simple."
-            )
+            # Este formato no muestra el estado en el día del calendario --
+            # hay que clickearlo para que aparezca el botón de compra. No
+            # necesita login, pero sí volver a cargar la página por cada
+            # fecha (el click reemplaza el contenido), igual que el profundo.
+            month = _get_mes_texto(page)
+            labels = []
+            for index, date_button in enumerate(calendar_dates):
+                try:
+                    day = date_button.query_selector("p")
+                    day_text = day.inner_text().strip() if day else str(index + 1)
+                except Exception:
+                    day_text = str(index + 1)
+                labels.append(f"{day_text} de {month}".strip())
+
+            for index, label in enumerate(labels):
+                try:
+                    page.goto(url, timeout=30000)
+                    _wait_after_navigation(page)
+                    dates_fresh = _wait_for_index(page, "button.dia-evento", index)
+                    if index >= len(dates_fresh):
+                        fechas_estado[label] = STATUS_UNKNOWN
+                        purchase_signals[label] = False
+                        continue
+                    dates_fresh[index].click()
+                    page.wait_for_timeout(1000)
+                    _clasificar_fila_simple(page, label, fechas_estado, purchase_signals)
+                except Exception as exc:
+                    logging.warning(
+                        "[Movistar-Simple] Error verificando %s: %s", label, exc
+                    )
+                    fechas_estado[label] = STATUS_UNKNOWN
+                    purchase_signals[label] = False
         else:
             fechas_estado["General"] = STATUS_UNKNOWN
             purchase_signals["General"] = False
