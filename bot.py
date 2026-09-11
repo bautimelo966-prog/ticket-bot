@@ -916,6 +916,31 @@ def _wait_for_index(page, selector: str, index: int, attempts: int = 12, wait_ms
     return items
 
 
+def _log_post_click_state(page, label: str):
+    """Diagnóstico: qué quedó en pantalla justo después de clickear comprar.
+
+    Sin esto, cuando el mapa no aparece no hay forma de saber si el click
+    navegó a otra URL, abrió un modal, o no cambió nada -- hay que
+    reproducirlo a mano para verlo. Queda en INFO porque es liviano y solo
+    importa cuando después no se detecta ningún sector.
+    """
+    try:
+        snippet = page.locator("body").inner_text(timeout=3000)[:400]
+    except Exception as exc:
+        snippet = f"<no se pudo leer body: {exc}>"
+    try:
+        title = page.title()
+    except Exception:
+        title = "<sin título>"
+    logging.info(
+        "[Movistar-Profundo] %s post-click → url=%s title=%s texto=%r",
+        label,
+        page.url,
+        title,
+        snippet,
+    )
+
+
 def _enter_calendar_map(page, url: str, date_index: int) -> str:
     page.goto(url, timeout=30000)
     _wait_after_navigation(page)
@@ -940,6 +965,7 @@ def _enter_calendar_map(page, url: str, date_index: int) -> str:
             exc,
         )
         return MOVISTAR_PURCHASE_SIGNAL_FAILED
+    _log_post_click_state(page, "calendario")
     return "entered"
 
 
@@ -968,6 +994,7 @@ def _enter_row_map(page, url: str, row_index: int, selector: str) -> str:
             exc,
         )
         return MOVISTAR_PURCHASE_SIGNAL_FAILED
+    _log_post_click_state(page, "fila")
     return "entered"
 
 
