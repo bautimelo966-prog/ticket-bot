@@ -1503,7 +1503,10 @@ def _clasificar_fila_simple(root, label: str, fechas_estado: dict, purchase_sign
     except Exception:
         button = None
     if button:
-        fechas_estado[label] = STATUS_CANDIDATE
+        # A diferencia del profundo, acá "disponible" no confirma un asiento
+        # real -- es la misma señal (botón Comprar/Seleccionar público) que
+        # ya alcanzaba para conseguir entradas con el checker anterior.
+        fechas_estado[label] = STATUS_AVAILABLE
         purchase_signals[label] = True
         return
     fechas_estado[label] = (
@@ -1605,16 +1608,15 @@ def _check_movistar_simple(url: str) -> dict:
     return {
         "status": status,
         "snippet": (
-            "apareció Comprar/Seleccionar; falta confirmar asiento (chequeo simple)"
-            if status == STATUS_CANDIDATE
+            "apareció Comprar/Seleccionar (chequeo simple)"
+            if status == STATUS_AVAILABLE
             else status
         ),
         "fechas": fechas_estado,
         "purchase_signals": purchase_signals,
         # Marca el origen para que run_check redacte la alerta distinto: acá
-        # "candidate" significa que el sitio público ya muestra Comprar, una
-        # señal más fuerte que la del profundo (sector habilitado sin poder
-        # confirmar asiento), que sigue mereciendo el tono más cauteloso.
+        # "available" significa que el sitio público ya muestra Comprar, no
+        # que se confirmó un asiento real (eso solo lo hace el profundo).
         "checker": "movistar_simple",
     }
 
@@ -1967,48 +1969,49 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
 
         if confirmed_dates:
             confirmed_text = ", ".join(escape(str(date)) for date in confirmed_dates)
-            queue_alert(
-                data,
-                "confirmed:" + "|".join(sorted(confirmed_dates)),
-                (
+            if result.get("checker") == "movistar_simple":
+                # El chequeo simple llega a "available" con la misma señal
+                # que el checker anterior usaba para avisar "disponible"
+                # directo (botón Comprar/Seleccionar público) -- no confirma
+                # un asiento real como sí hace el profundo, así que el texto
+                # no debe decir que se encontró un asiento.
+                confirmed_msg = (
+                    "🚨 <b>¡HAY DISPONIBLE!</b>\n\n"
+                    f"🎫 <b>{escape(str(name))}</b>\n"
+                    f"🗓 <i>{confirmed_text}</i>\n\n"
+                    "Apareció \"Comprar\"/\"Seleccionar\" donde antes decía "
+                    "Agotado.\n\n"
+                    f"👉 <a href='{escape(url, quote=True)}'>Comprá acá</a>"
+                )
+            else:
+                confirmed_msg = (
                     "🚨 <b>¡ENTRADAS CONFIRMADAS!</b>\n\n"
                     f"🎫 <b>{escape(str(name))}</b>\n"
                     f"🗓 <i>{confirmed_text}</i>\n\n"
                     "✅ El bot encontró asiento o cantidad seleccionable.\n\n"
                     f"👉 <a href='{escape(url, quote=True)}'>Comprá acá</a>"
-                ),
+                )
+            queue_alert(
+                data,
+                "confirmed:" + "|".join(sorted(confirmed_dates)),
+                confirmed_msg,
             )
 
         if candidate_dates:
             candidate_text = ", ".join(
                 escape(str(date)) for date in candidate_dates
             )
-            if result.get("checker") == "movistar_simple":
-                # El chequeo simple solo llega a "candidate" cuando el sitio
-                # público ya muestra Comprar/Seleccionar en vez de Agotado --
-                # la misma señal que antes alcanzaba para conseguir entradas,
-                # así que acá sí se avisa con tono de urgencia.
-                candidate_msg = (
-                    "🚨 <b>¡HAY DISPONIBLE!</b>\n\n"
-                    f"🎫 <b>{escape(str(name))}</b>\n"
-                    f"🗓 <i>{candidate_text}</i>\n\n"
-                    "Apareció \"Comprar\"/\"Seleccionar\" donde antes decía "
-                    "Agotado.\n\n"
-                    f"👉 <a href='{escape(url, quote=True)}'>Comprá acá</a>"
-                )
-            else:
-                candidate_msg = (
+            queue_alert(
+                data,
+                "candidate:" + "|".join(sorted(candidate_dates)),
+                (
                     "🟡 <b>POSIBLE LIBERACIÓN</b>\n\n"
                     f"🎫 <b>{escape(str(name))}</b>\n"
                     f"🗓 <i>{candidate_text}</i>\n\n"
                     "Apareció una señal de compra o un sector habilitado, "
                     "pero todavía no pude confirmar un asiento seleccionable.\n\n"
                     f"👉 <a href='{escape(url, quote=True)}'>Revisá ahora</a>"
-                )
-            queue_alert(
-                data,
-                "candidate:" + "|".join(sorted(candidate_dates)),
-                candidate_msg,
+                ),
             )
 
         previous_check = float(data.get("last_check", 0) or 0)
