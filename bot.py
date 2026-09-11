@@ -1026,7 +1026,6 @@ def _enter_calendar_map(page, url: str, date_index: int) -> str:
             exc,
         )
         return MOVISTAR_PURCHASE_SIGNAL_FAILED
-    _log_post_click_state(page, "calendario")
     return "entered"
 
 
@@ -1060,7 +1059,6 @@ def _enter_row_map(page, url: str, row_index: int, selector: str) -> str:
             exc,
         )
         return MOVISTAR_PURCHASE_SIGNAL_FAILED
-    _log_post_click_state(page, "fila")
     return "entered"
 
 
