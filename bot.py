@@ -453,6 +453,11 @@ def _login_movistar(page):
     logging.info("[Movistar] Paso 2: Completando formulario...")
     page.fill("#inputEmail", email)
     page.fill("#inputPassword", password)
+    # page.fill() setea el valor de una sola vez, distinto de cómo lo hace un
+    # humano tipeando. Si el formulario usa binding con debounce (frecuente
+    # en Blazor), un click inmediato puede llegar antes de que el framework
+    # haya registrado el valor recién puesto.
+    page.wait_for_timeout(500)
 
     logging.info("[Movistar] Paso 3: Haciendo click en login...")
     page.click("button.btn-login")
@@ -469,6 +474,7 @@ def _login_movistar(page):
     except Exception:
         body_text = ""
     if "iniciá sesión o creá tu cuenta" in body_text or "iniciar sesión" in body_text:
+        _log_post_click_state(page, "login fallido")
         raise Exception(
             "El login no se confirmó: el sitio sigue mostrando 'Iniciar sesión' "
             "después de intentar loguearse (¿credenciales vencidas o inválidas?)."
