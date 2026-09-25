@@ -139,7 +139,7 @@ class AllAccessTests(unittest.TestCase):
 
         self.assertIsNone(bot._allaccess_global_status(page))
 
-    def test_date_only_selectable_show_is_candidate(self):
+    def test_date_only_selectable_show_is_available(self):
         item = MagicMock()
         item.query_selector.return_value = MagicMock()
 
@@ -148,7 +148,7 @@ class AllAccessTests(unittest.TestCase):
                 item,
                 "25/02/2027 20:00 - 25 de febrero de 2027",
             ),
-            bot.STATUS_CANDIDATE,
+            bot.STATUS_AVAILABLE,
         )
 
     def test_explicit_sold_out_wins_over_selectable_template(self):
@@ -576,6 +576,35 @@ class AlertDeliveryTests(unittest.TestCase):
         self.assertTrue(any("POSIBLE LIBERACIÓN" in text for text in sent))
         self.assertEqual(urls[url]["next_retry_at"], 1030)
         self.assertEqual(urls[url]["consecutive_failures"], 1)
+
+    def test_allaccess_going_on_sale_alerts_hay_disponible(self):
+        url = "https://www.deportick.com/event/argbenin26"
+        urls = {
+            url: {
+                "name": "Show",
+                "last_status": bot.STATUS_SOLD_OUT,
+                "last_check": 0,
+                "fechas": {"General": bot.STATUS_SOLD_OUT},
+                "last_known_fechas": {"General": bot.STATUS_SOLD_OUT},
+                "pending_alerts": [],
+            }
+        }
+        on_sale = {
+            "status": bot.STATUS_AVAILABLE,
+            "snippet": "dejó de figurar agotado",
+            "fechas": {"Fecha": bot.STATUS_AVAILABLE},
+            "checker": "allaccess",
+        }
+        sent = []
+        with patch.object(bot, "check_url", return_value=on_sale):
+            with patch.object(
+                bot, "send_telegram", side_effect=lambda text: sent.append(text) or True
+            ):
+                bot.run_check(urls, force=True)
+
+        self.assertTrue(any("HAY DISPONIBLE" in text for text in sent))
+        self.assertFalse(any("POSIBLE LIBERACIÓN" in text for text in sent))
+        self.assertEqual(urls[url]["last_status"], bot.STATUS_AVAILABLE)
 
     def test_candidate_does_not_suppress_later_confirmation(self):
         url = "https://www.movistararena.com.ar/Ticketera/test"

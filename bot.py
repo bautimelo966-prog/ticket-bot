@@ -1236,7 +1236,12 @@ def _allaccess_global_status(page) -> str | None:
 
 
 def _allaccess_show_item_status(item, signal: str) -> str:
-    """Clasifica una función del desplegable sin depender de su texto."""
+    """Clasifica una función del desplegable sin depender de su texto.
+
+    ``available`` acá significa que la función ya se puede elegir (dejó de
+    figurar agotada), no que se haya verificado un asiento: este checker no
+    abre nada del proceso de compra.
+    """
     if any(word in signal for word in ("agotado", "sold out", "disabled")):
         return STATUS_SOLD_OUT
 
@@ -1244,7 +1249,7 @@ def _allaccess_show_item_status(item, signal: str) -> str:
     # fecha. La señal estable es el enlace ``a.show`` con el id de la función.
     try:
         if item.query_selector("a.show"):
-            return STATUS_CANDIDATE
+            return STATUS_AVAILABLE
     except Exception as exc:
         logging.debug("[AllAccess] No se pudo inspeccionar a.show: %s", exc)
 
@@ -1252,7 +1257,7 @@ def _allaccess_show_item_status(item, signal: str) -> str:
         word in signal
         for word in ("comprar", "seleccionar", "disponible", "available")
     ):
-        return STATUS_CANDIDATE
+        return STATUS_AVAILABLE
     return STATUS_UNKNOWN
 
 
@@ -1313,7 +1318,7 @@ def _check_allaccess(url: str) -> dict:
         # Respaldo para páginas de una sola función que publican el botón
         # directo sin construir el desplegable.
         if not fechas_estado and _visible_element(page, "#buyButton"):
-            fechas_estado["General"] = STATUS_CANDIDATE
+            fechas_estado["General"] = STATUS_AVAILABLE
             logging.info(
                 "[AllAccess] Botón Ver entradas habilitado sin dropdown"
             )
@@ -1324,11 +1329,15 @@ def _check_allaccess(url: str) -> dict:
     return {
         "status": status,
         "snippet": (
-            "señal de compra detectada; falta confirmar inventario"
-            if status == STATUS_CANDIDATE
+            "dejó de figurar agotado; apareció la opción de compra"
+            if status == STATUS_AVAILABLE
             else status
         ),
         "fechas": fechas_estado,
+        # Hace que run_check avise "¡HAY DISPONIBLE!" (ver checker simple de
+        # Movistar): misma señal, aparece la opción de compra donde antes
+        # decía Agotado.
+        "checker": "allaccess",
     }
 
 
@@ -1971,17 +1980,17 @@ def run_check(urls: dict, notify_no_change: bool = False, force: bool = False):
 
         if confirmed_dates:
             confirmed_text = ", ".join(escape(str(date)) for date in confirmed_dates)
-            if result.get("checker") == "movistar_simple":
-                # El chequeo simple llega a "available" con la misma señal
-                # que el checker anterior usaba para avisar "disponible"
-                # directo (botón Comprar/Seleccionar público) -- no confirma
-                # un asiento real como sí hace el profundo, así que el texto
-                # no debe decir que se encontró un asiento.
+            if result.get("checker") in ("movistar_simple", "allaccess"):
+                # Estos checkers llegan a "available" cuando aparece la
+                # opción de compra donde antes decía Agotado (la misma señal
+                # que el bot anterior usaba para avisar "disponible"). No
+                # confirman un asiento real como sí hace el profundo, así que
+                # el texto no debe decir que se encontró un asiento.
                 confirmed_msg = (
                     "🚨 <b>¡HAY DISPONIBLE!</b>\n\n"
                     f"🎫 <b>{escape(str(name))}</b>\n"
                     f"🗓 <i>{confirmed_text}</i>\n\n"
-                    "Apareció \"Comprar\"/\"Seleccionar\" donde antes decía "
+                    "Apareció la opción de compra donde antes decía "
                     "Agotado.\n\n"
                     f"👉 <a href='{escape(url, quote=True)}'>Comprá acá</a>"
                 )
