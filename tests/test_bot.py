@@ -69,6 +69,16 @@ class RoutingTests(unittest.TestCase):
         bts.assert_called_once_with(url.rstrip("/"))
         standard.assert_not_called()
 
+    def test_deportick_uses_allaccess_checker_with_fast_interval(self):
+        url = "https://www.deportick.com/event/argbenin26"
+        with patch.object(
+            bot, "check_allaccess", return_value={"status": "ok"}
+        ) as allaccess:
+            result = bot.check_url(url)
+        self.assertEqual(result, {"status": "ok"})
+        allaccess.assert_called_once_with(url)
+        self.assertEqual(bot.get_interval(url), bot.CHECK_INTERVAL_ALLACCESS)
+
     def test_normalize_url_keeps_query_and_removes_trailing_slash(self):
         self.assertEqual(
             bot.normalize_url(" HTTPS://EXAMPLE.COM/event/?x=1 "),

@@ -324,7 +324,7 @@ def get_telegram_updates(offset: int) -> list:
 def get_interval(url: str) -> int:
     if "movistararena.com.ar" in url:
         return CHECK_INTERVAL_MOVISTAR
-    if "allaccess.com.ar" in url:
+    if "allaccess.com.ar" in url or "deportick.com" in url:
         return CHECK_INTERVAL_ALLACCESS
     if "enigmatickets.com" in url:
         return CHECK_INTERVAL_ALLACCESS
@@ -1652,7 +1652,9 @@ def check_url(url: str, deep: bool = False) -> dict:
         return check_movistar_simple(normalized)
     if host.endswith("allaccess.com.ar") and path.startswith("/event/bts"):
         return check_bts(normalized)
-    if host.endswith("allaccess.com.ar"):
+    # Deportick corre sobre la misma plataforma (Boletius) que AllAccess:
+    # mismo marcado (event-status, ul#show-dropdown a.show, #buyButton).
+    if host.endswith("allaccess.com.ar") or host.endswith("deportick.com"):
         return check_allaccess(normalized)
     if host.endswith("enigmatickets.com"):
         return check_enigmatickets(normalized)
@@ -1847,7 +1849,7 @@ def handle_command(text: str, urls: dict) -> str:
             "/profundo URL on|off — Activar/desactivar la verificación "
             "de asiento real para un evento de Movistar puntual\n"
             "/help — Ver esta ayuda\n\n"
-            "AllAccess y Enigma: cada 5 minutos\n"
+            "AllAccess, Deportick y Enigma: cada 5 minutos\n"
             "Movistar Arena: cada 10 minutos\n\n"
             "Movistar Arena por defecto usa el chequeo simple (avisa "
             "apenas aparece Comprar/Seleccionar, sin confirmar asiento)."
