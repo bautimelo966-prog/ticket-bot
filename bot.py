@@ -1077,12 +1077,26 @@ def _enter_event_row_map(page, url: str, row_index: int) -> str:
 
 
 def _movistar_row_label(row, index: int) -> str:
+    """
+    Arma la etiqueta de una fila. Si el evento vende por sector/paquete
+    (ej. "K4 DIAMANTE", "K4 ORO — CAMPO DE PIE"), cada tier publica su
+    propia fila con la MISMA fecha -- sin incluir el tier, varias filas
+    distintas colapsarían en la misma clave y se pisarían entre sí en
+    fechas_estado, perdiendo el estado real de todas menos la última
+    procesada para esa fecha.
+    """
     try:
         day_el = row.query_selector("div.fecha p")
         month_el = row.query_selector("div.fecha span")
         day = day_el.inner_text().strip() if day_el else ""
         month = month_el.inner_text().strip() if month_el else ""
-        return f"{day} de {month}".strip() or f"Fecha {index + 1}"
+        fecha = f"{day} de {month}".strip()
+
+        tier_el = row.query_selector("div.tag-vip span")
+        tier = tier_el.inner_text().strip() if tier_el else ""
+
+        label = f"{fecha} — {tier}" if fecha and tier else fecha
+        return label or f"Fecha {index + 1}"
     except Exception:
         return f"Fecha {index + 1}"
 
